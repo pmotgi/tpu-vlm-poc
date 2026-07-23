@@ -1,0 +1,137 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: llama3-3-70b-checkpoint-converter
+  namespace: default
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: slice
+    template:
+      metadata:
+        labels:
+          app: llama3-3-70b-checkpoint-converter
+      spec:
+        parallelism: 2
+        completions: 2
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              app: llama3-3-70b-checkpoint-converter
+            annotations:
+              gke-gcsfuse/volumes: "true"
+          spec:
+            schedulerName: default-scheduler
+            restartPolicy: Never
+            serviceAccountName: workload-identity-k8s-sa
+            automountServiceAccountToken: true
+            
+            nodeSelector:
+              cloud.google.com/gke-accelerator-count: "4"
+              cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-test
+              cloud.google.com/gke-tpu-accelerator: tpu7x
+              cloud.google.com/gke-tpu-topology: 2x2x2
+            
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            
+            initContainers:
+            - name: scanned-converter
+              image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+              securityContext:
+                privileged: true
+              command:
+              - bash
+              - -c
+              - |
+                set -e
+                export SCANNED_PATH="/checkpoint/maxtext/llama3.3-70b/scanned_chkpt"
+                echo "=== [initContainer: scanned-converter] Checking if scanned Orbax checkpoint already exists on GCS ==="
+                if [ -f "${SCANNED_PATH}/0/items/manifest.ocdbt" ] || [ -d "${SCANNED_PATH}/0/items" ]; then
+                  echo "Scanned Orbax checkpoint already found at ${SCANNED_PATH}/0/items. Skipping scanned conversion!"
+                else
+                  echo "Scanned conversion required or pending."
+                fi
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /checkpoint
+                name: gcs-vol
+            
+            containers:
+            - name: unscanned-converter
+              image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+              securityContext:
+                privileged: true
+              command:
+              - bash
+              - -c
+              - |
+                set -e
+                POD_INDEX=${JOB_COMPLETION_INDEX:-$(echo "${HOSTNAME:-$POD_NAME}" | awk -F'-' '{print $NF}')}
+                echo "=== [container: unscanned-converter] Running on Pod Index ${POD_INDEX} across 2x2x2 TPU mesh ==="
+                
+                export TPU_STDERR_LOG_LEVEL=0
+                export TPU_MIN_LOG_LEVEL=0
+                export TF_CPP_MIN_LOG_LEVEL=0
+                export JAX_PLATFORMS='tpu,cpu'
+                export ENABLE_PJRT_COMPATIBILITY='true'
+                export GOOGLE_CLOUD_PROJECT="northam-ce-mlai-tpu"
+                export SCANNED_PATH="/checkpoint/maxtext/llama3.3-70b/scanned_chkpt"
+                export UNSCANNED_DIR="/checkpoint/maxtext/llama3.3-70b"
+                
+                echo "=== 1. Checking if unscanned Orbax checkpoint already exists on GCS ==="
+                if [ -f "${UNSCANNED_DIR}/unscanned_chkpt/checkpoints/0/items/manifest.ocdbt" ]; then
+                  echo "Unscanned Orbax checkpoint already exists. Skipping unscanned conversion!"
+                else
+                  echo "=== 2. Generating Unscanned Parameter-Only Checkpoint directly on PVC (${UNSCANNED_DIR}/unscanned_chkpt) across 2x2x2 TPU slice ==="
+                  cd /deps/src || cd / || true
+                  export MAXTEXT_CONFIGS="maxtext/configs/base.yml"
+                  if [ ! -f "$MAXTEXT_CONFIGS" ]; then
+                    export MAXTEXT_CONFIGS="src/maxtext/configs/base.yml"
+                  fi
+                  
+                  # Clean any partial checkpoints on Pod 0 before starting JAX, and sleep 5s on Pod 1 to prevent gcsfuse race conditions
+                  if [ "$POD_INDEX" = "0" ]; then
+                    echo "Pod 0 cleaning old/partial unscanned checkpoint directory..."
+                    rm -rf "${UNSCANNED_DIR}/unscanned_chkpt/checkpoints" 2>/dev/null || true
+                  else
+                    echo "Pod 1 waiting 5s for Pod 0 directory cleanup..."
+                    sleep 5
+                  fi
+                  
+                  # Disable path.rmtree() inside generate_param_only_checkpoint.py so gcsfuse does not raise Errno 5 across multiple TPU pods
+                  python3 -c "import os; p='/deps/src/maxtext/utils/generate_param_only_checkpoint.py'; (code := open(p).read(), open(p,'w').write(code.replace('if jax.process_index() == 0:\n      path.rmtree()', 'pass'))) if os.path.exists(p) else None"
+                  
+                  python3 -m maxtext.utils.generate_param_only_checkpoint \
+                    "${MAXTEXT_CONFIGS}" \
+                    async_checkpointing=false \
+                    base_output_directory="${UNSCANNED_DIR}" \
+                    load_parameters_path="${SCANNED_PATH}/0/items" \
+                    run_name="unscanned_chkpt" \
+                    model_name="llama3.3-70b" \
+                    force_unroll=true
+                fi
+                echo "=== Checkpoint Conversion Complete across 2x2x2 slice! ==="
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /checkpoint
+                name: gcs-vol
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: gcs-vol
+              persistentVolumeClaim:
+                claimName: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc

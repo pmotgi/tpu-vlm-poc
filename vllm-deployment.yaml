@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+  labels:
+    app: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/memory-limit: "500Gi"
+        gke-gcsfuse/ephemeral-storage-limit: "20Gi"
+    spec:
+      serviceAccountName: workload-identity-k8s-sa
+      nodeSelector:
+        cloud.google.com/gke-nodepool: g4-spot-pool
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "cloud.google.com/gke-spot"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - "--model=/gcs/huggingface/llama3.3-70b-instruct"
+        - "--tensor-parallel-size=4"
+        - "--enable-lora"
+        - "--lora-modules=finetuned-lora=/gcs/llama3.3-70b/lora_training/llama3-3-70b-lora-2x2x2-bs16/hf_lora_adapter"
+        - "--max-model-len=8192"
+        - "--gpu-memory-utilization=0.8"
+        - "--host=0.0.0.0"
+        - "--port=8000"
+        env:
+        - name: NCCL_P2P_DISABLE
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: "4"
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: gcs-bucket
+          mountPath: /gcs
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: gcs-bucket
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: checkpoint-data-pmotgi-tpu-v7x-04a179d1
+            mountOptions: "implicit-dirs"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  annotations:
+    networking.gke.io/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  selector:
+    app: vllm
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
