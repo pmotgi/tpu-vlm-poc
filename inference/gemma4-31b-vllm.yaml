@@ -19,6 +19,7 @@ spec:
     spec:
       serviceAccountName: workload-identity-k8s-sa
       nodeSelector:
+        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-test
         cloud.google.com/gke-tpu-accelerator: tpu7x
         cloud.google.com/gke-tpu-topology: 2x2x2
       tolerations:
