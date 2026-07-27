@@ -1,15 +1,12 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: gemma4-31b-vllm-tpu
   namespace: default
-  labels:
-    app: gemma4-31b-vllm-tpu
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: gemma4-31b-vllm-tpu
+  parallelism: 1
+  completions: 1
+  backoffLimit: 0
   template:
     metadata:
       labels:
@@ -17,15 +14,24 @@ spec:
       annotations:
         gke-gcsfuse/volumes: "true"
     spec:
+      schedulerName: default-scheduler
+      restartPolicy: Never
       serviceAccountName: workload-identity-k8s-sa
+      automountServiceAccountToken: true
+      
       nodeSelector:
-        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-test
         cloud.google.com/gke-tpu-accelerator: tpu7x
         cloud.google.com/gke-tpu-topology: 2x2x2
+      
       tolerations:
       - key: google.com/tpu
         operator: Exists
         effect: NoSchedule
+      - key: cloud.google.com/gke-queued
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      
       containers:
       - name: vllm-tpu
         image: vllm/vllm-tpu:nightly-20260604-2aaa59e-4f423bd
