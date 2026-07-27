@@ -20,6 +20,7 @@ spec:
       automountServiceAccountToken: true
       
       nodeSelector:
+        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-test
         cloud.google.com/gke-tpu-accelerator: tpu7x
         cloud.google.com/gke-tpu-topology: 2x2x2
       
@@ -27,7 +28,7 @@ spec:
       - key: google.com/tpu
         operator: Exists
         effect: NoSchedule
-      - key: cloud.google.com/gke-queued
+      - key: cloud.google.com/gke-spot
         operator: Equal
         value: "true"
         effect: NoSchedule
