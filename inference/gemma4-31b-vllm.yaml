@@ -1,0 +1,126 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hyperdisk-balanced-tpu
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: hyperdisk-balanced
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma4-31b-vllm-tpu
+  namespace: default
+  labels:
+    app: gemma4-31b-vllm-tpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemma4-31b-vllm-tpu
+  template:
+    metadata:
+      labels:
+        app: gemma4-31b-vllm-tpu
+      annotations:
+        gke-gcsfuse/volumes: "true"
+    spec:
+      serviceAccountName: workload-identity-k8s-sa
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 1x1x1
+      tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm-tpu
+        image: vllm/vllm-tpu:nightly-20260330-2f76400-8c0b626
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - --host=0.0.0.0
+        - --port=8000
+        - --seed=42
+        - --model=google/gemma-4-31b-it
+        - --tensor-parallel-size=1
+        - --data-parallel-size=1
+        - --max-model-len=8192
+        - --max-num-batched-tokens=4096
+        - --max-num-seqs=128
+        - --gpu-memory-utilization=0.95
+        - --block-size=256
+        - --no-enable-prefix-caching
+        - --async-scheduling
+        - --download-dir=/data
+        env:
+        - name: HF_HOME
+          value: /data
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        - name: LAYOUT_Q_PROJ_AS_NDH
+          value: "1"
+        - name: USE_BATCHED_RPA_KERNEL
+          value: "1"
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            google.com/tpu: '1'
+          requests:
+            google.com/tpu: '1'
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: "/data"
+          name: data-volume
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /gcs
+          name: gcs-bucket
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
+      - name: gcs-bucket
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: checkpoint-data-pmotgi-tpu-v7x-04a179d1
+            mountOptions: "implicit-dirs"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma4-31b-vllm-service
+spec:
+  selector:
+    app: gemma4-31b-vllm-tpu
+  type: LoadBalancer
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
