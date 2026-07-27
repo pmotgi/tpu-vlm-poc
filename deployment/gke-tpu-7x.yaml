@@ -1,0 +1,146 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+blueprint_name: gke-tpu-7x
+
+vars:
+  # GCP Project ID
+  project_id:
+
+  # Unique deployment name
+  deployment_name: gke-tpu-7x
+
+  # GCP Region and Zone
+  region: us-east5
+  zone: us-east5-a
+
+  # Number of TPU slices (node pools)
+  num_slices: 1
+
+  # Machine type & topology
+  machine_type: tpu7x-standard-4t
+  tpu_topology: 2x2x2
+
+  # Authorized CIDR for kubectl access
+  authorized_cidr: 0.0.0.0/0
+
+  # Compute engine reservation name
+  reservation:
+
+  enable_pathways_for_tpus: true
+  accelerator_type: tpu7x
+  user_namespace: default
+
+deployment_groups:
+- group: primary
+  modules:
+  - id: gke-tpu-7x-net
+    source: modules/network/vpc
+    settings:
+      subnetworks:
+      - subnet_name: $(vars.deployment_name)-sub-0
+        subnet_region: $(vars.region)
+        subnet_ip: 192.168.0.0/18
+      secondary_ranges_list:
+      - subnetwork_name: $(vars.deployment_name)-sub-0
+        ranges:
+        - range_name: pods
+          ip_cidr_range: 10.4.0.0/14
+        - range_name: services
+          ip_cidr_range: 10.0.32.0/20
+      firewall_rules:
+      - name: $(vars.deployment_name)-internal-0
+        ranges: [192.168.0.0/18]
+        allow:
+        - protocol: tcp
+          ports: ["0-65535"]
+        - protocol: udp
+          ports: ["0-65535"]
+        - protocol: icmp
+
+  - id: node_pool_service_account
+    source: modules/project/service-account
+    settings:
+      name: gke-np-sa
+      project_roles:
+      - logging.logWriter
+      - monitoring.metricWriter
+      - monitoring.viewer
+      - stackdriver.resourceMetadata.writer
+      - storage.objectViewer
+      - artifactregistry.reader
+
+  - id: workload_service_account
+    source: modules/project/service-account
+    settings:
+      name: gke-wl-sa
+      project_roles:
+      - logging.logWriter
+      - monitoring.metricWriter
+      - monitoring.viewer
+      - stackdriver.resourceMetadata.writer
+      - storage.admin
+      - artifactregistry.reader
+      - container.admin
+      - hypercomputecluster.editor
+
+  - id: gke-tpu-7x-cluster
+    source: modules/scheduler/gke-cluster
+    use: [gke-tpu-7x-net, workload_service_account]
+    settings:
+      system_node_pool_machine_type: "n2-standard-8"
+      system_node_pool_taints: []
+      enable_private_endpoint: false
+      enable_pathways_for_tpus: $(vars.enable_pathways_for_tpus)
+      configure_workload_identity_sa: true
+      namespace: $(vars.user_namespace)
+      master_authorized_networks:
+      - cidr_block: $(vars.authorized_cidr)
+        display_name: "kubectl-access-network"
+      version_prefix: "1.35."
+      release_channel: REGULAR
+    outputs: [instructions]
+
+  - id: workload_policy
+    source: modules/compute/resource-policy
+    settings:
+      name: "tpu7x-workload-policy"
+      project_id: $(vars.project_id)
+      region: $(vars.region)
+      workload_policy:
+        accelerator_topology: $(vars.tpu_topology)
+        type: "HIGH_THROUGHPUT"
+
+  - id: gke-tpu-7x-pool
+    source: modules/compute/gke-node-pool
+    use: [gke-tpu-7x-cluster, node_pool_service_account, workload_policy]
+    settings:
+      num_slices: $(vars.num_slices)
+      name: gke-tpu-7x-pool
+      disk_type: hyperdisk-balanced
+      machine_type: $(vars.machine_type)
+      auto_upgrade: true
+      zones: [$(vars.zone)]
+    outputs: [instructions]
+
+  - id: workload-manager-install
+    source: modules/management/kubectl-apply
+    use: [gke-tpu-7x-cluster]
+    settings:
+      kueue:
+        install: true
+      jobset:
+        install: true
+      cert_manager:
+        install: true
