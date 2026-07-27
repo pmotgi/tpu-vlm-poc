@@ -37,10 +37,10 @@ spec:
         - --trust-remote-code
         - --tensor-parallel-size=4
         - --data-parallel-size=1
-        - --max-model-len=8192
-        - --max-num-batched-tokens=4096
-        - --max-num-seqs=128
-        - --gpu-memory-utilization=0.95
+        - --max-model-len=1524
+        - --max-num-batched-tokens=16384
+        - --max-num-seqs=256
+        - --gpu-memory-utilization=0.90
         - --block-size=256
         - --no-enable-prefix-caching
         - --async-scheduling
@@ -75,9 +75,9 @@ spec:
         readinessProbe:
           tcpSocket:
             port: 8000
-          initialDelaySeconds: 300
-          periodSeconds: 15
-          failureThreshold: 20
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 60
         volumeMounts:
         - mountPath: "/data"
           name: data-volume
