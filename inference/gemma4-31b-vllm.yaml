@@ -1,25 +1,3 @@
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: hyperdisk-balanced-tpu
-provisioner: pd.csi.storage.gke.io
-parameters:
-  type: hyperdisk-balanced
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 500Gi
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,7 +20,7 @@ spec:
       serviceAccountName: workload-identity-k8s-sa
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: tpu7x
-        cloud.google.com/gke-tpu-topology: 1x1x1
+        cloud.google.com/gke-tpu-topology: 2x2x2
       tolerations:
       - key: google.com/tpu
         operator: Exists
@@ -56,7 +34,7 @@ spec:
         - --port=8000
         - --seed=42
         - --model=google/gemma-4-31b-it
-        - --tensor-parallel-size=1
+        - --tensor-parallel-size=4
         - --data-parallel-size=1
         - --max-model-len=8192
         - --max-num-batched-tokens=4096
@@ -82,9 +60,9 @@ spec:
         - containerPort: 8000
         resources:
           limits:
-            google.com/tpu: '1'
+            google.com/tpu: '4'
           requests:
-            google.com/tpu: '1'
+            google.com/tpu: '4'
         readinessProbe:
           tcpSocket:
             port: 8000
