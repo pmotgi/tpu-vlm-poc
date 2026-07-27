@@ -27,13 +27,14 @@ spec:
         effect: NoSchedule
       containers:
       - name: vllm-tpu
-        image: vllm/vllm-tpu:nightly-20260330-2f76400-8c0b626
+        image: vllm/vllm-tpu:nightly-20260604-2aaa59e-4f423bd
         command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
         args:
         - --host=0.0.0.0
         - --port=8000
         - --seed=42
         - --model=google/gemma-4-31b-it
+        - --trust-remote-code
         - --tensor-parallel-size=4
         - --data-parallel-size=1
         - --max-model-len=8192
@@ -44,7 +45,15 @@ spec:
         - --no-enable-prefix-caching
         - --async-scheduling
         - --download-dir=/data
+        - '--limit-mm-per-prompt={"image": 1, "video": 0, "audio": 0}'
+        - --disable-chunked-mm-input
         env:
+        - name: MODEL_IMPL_TYPE
+          value: "flax_nnx"
+        - name: VLLM_ENGINE_READY_TIMEOUT_S
+          value: "1800"
+        - name: TPU_MULTIPROCESS_DP
+          value: "1"
         - name: HF_HOME
           value: /data
         - name: HUGGING_FACE_HUB_TOKEN
