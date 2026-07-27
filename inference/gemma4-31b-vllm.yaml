@@ -75,8 +75,9 @@ spec:
         readinessProbe:
           tcpSocket:
             port: 8000
-          initialDelaySeconds: 30
-          periodSeconds: 10
+          initialDelaySeconds: 300
+          periodSeconds: 15
+          failureThreshold: 20
         volumeMounts:
         - mountPath: "/data"
           name: data-volume
