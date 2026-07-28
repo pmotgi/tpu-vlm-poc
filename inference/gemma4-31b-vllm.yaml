@@ -21,9 +21,9 @@ spec:
     spec:
       serviceAccountName: workload-identity-k8s-sa
       nodeSelector:
-        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-1t
+        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-test
         cloud.google.com/gke-tpu-accelerator: tpu7x
-        cloud.google.com/gke-tpu-topology: 1x1x1
+        cloud.google.com/gke-tpu-topology: 2x2x2
       tolerations:
       - key: google.com/tpu
         operator: Exists
@@ -42,7 +42,7 @@ spec:
         - --seed=42
         - --model=google/gemma-4-31b-it
         - --trust-remote-code
-        - --tensor-parallel-size=1
+        - --tensor-parallel-size=4
         - --data-parallel-size=1
         - --max-model-len=8192
         - --max-num-batched-tokens=16384
@@ -77,9 +77,9 @@ spec:
         - containerPort: 8000
         resources:
           limits:
-            google.com/tpu: '1'
+            google.com/tpu: '4'
           requests:
-            google.com/tpu: '1'
+            google.com/tpu: '4'
         readinessProbe:
           tcpSocket:
             port: 8000
