@@ -7,6 +7,8 @@ metadata:
     app: gemma4-31b-vllm-tpu
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: gemma4-31b-vllm-tpu
@@ -50,6 +52,7 @@ spec:
         - --no-enable-prefix-caching
         - --async-scheduling
         - --download-dir=/data
+        - --safetensors-load-strategy=prefetch
         - '--limit-mm-per-prompt={"image": 1, "video": 0, "audio": 0}'
         - --disable-chunked-mm-input
         env:
@@ -95,8 +98,7 @@ spec:
         emptyDir:
           medium: Memory
       - name: data-volume
-        persistentVolumeClaim:
-          claimName: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
+        emptyDir: {}
       - name: gcs-bucket
         csi:
           driver: gcsfuse.csi.storage.gke.io
