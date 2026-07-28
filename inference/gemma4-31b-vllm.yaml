@@ -45,17 +45,10 @@ spec:
         - --tensor-parallel-size=1
         - --data-parallel-size=1
         - --max-model-len=8192
-        - --max-num-batched-tokens=8192
-        - --max-num-seqs=256
-        - --gpu-memory-utilization=0.95
-        - --block-size=256
-        - --no-enable-prefix-caching
         - --async-scheduling
         - --download-dir=/data
         - --safetensors-load-strategy=prefetch
         - --reasoning-parser=gemma4
-        - '--limit-mm-per-prompt={"image": 1, "video": 0, "audio": 0}'
-        - --disable-chunked-mm-input
         env:
         - name: MODEL_IMPL_TYPE
           value: "flax_nnx"
