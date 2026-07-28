@@ -21,9 +21,9 @@ spec:
     spec:
       serviceAccountName: workload-identity-k8s-sa
       nodeSelector:
-        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-test
+        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-1t
         cloud.google.com/gke-tpu-accelerator: tpu7x
-        cloud.google.com/gke-tpu-topology: 2x2x2
+        cloud.google.com/gke-tpu-topology: 1x1x1
       tolerations:
       - key: google.com/tpu
         operator: Exists
@@ -42,20 +42,13 @@ spec:
         - --seed=42
         - --model=google/gemma-4-31b-it
         - --trust-remote-code
-        - --tensor-parallel-size=4
+        - --tensor-parallel-size=1
         - --data-parallel-size=1
         - --max-model-len=8192
-        - --max-num-batched-tokens=16384
-        - --max-num-seqs=256
-        - --gpu-memory-utilization=0.90
-        - --block-size=256
-        - --no-enable-prefix-caching
         - --async-scheduling
         - --download-dir=/data
         - --safetensors-load-strategy=prefetch
         - --reasoning-parser=gemma4
-        - '--limit-mm-per-prompt={"image": 1, "video": 0, "audio": 0}'
-        - --disable-chunked-mm-input
         env:
         - name: MODEL_IMPL_TYPE
           value: "flax_nnx"
@@ -78,9 +71,9 @@ spec:
         - containerPort: 8000
         resources:
           limits:
-            google.com/tpu: '4'
+            google.com/tpu: '1'
           requests:
-            google.com/tpu: '4'
+            google.com/tpu: '1'
         readinessProbe:
           tcpSocket:
             port: 8000
