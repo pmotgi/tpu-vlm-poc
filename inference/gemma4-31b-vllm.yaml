@@ -54,7 +54,8 @@ spec:
         - --download-dir=/data
         - --safetensors-load-strategy=prefetch
         - --reasoning-parser=gemma4
-        - --language-model-only
+        - '--limit-mm-per-prompt={"image": 1, "video": 0, "audio": 0}'
+        - --disable-chunked-mm-input
         env:
         - name: MODEL_IMPL_TYPE
           value: "flax_nnx"
