@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-gemma4-vllm
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: benchmark-gemma4-vllm
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: vllm/vllm-tpu:latest
+        command:
+        - "vllm"
+        - "bench"
+        - "serve"
+        - "--backend"
+        - "openai-chat"
+        - "--base-url"
+        - "http://gemma4-vllm-tpu-v6e-service:8000"
+        - "--endpoint"
+        - "/v1/chat/completions"
+        - "--model"
+        - "google/gemma-4-31b-it"
+        - "--dataset-name"
+        - "random-mm"
+        - "--random-mm-base-items-per-request"
+        - "1"
+        - "--num-prompts"
+        - "1000"
+        - "--random-input-len"
+        - "256"
+        - "--random-output-len"
+        - "512"
+        - "--request-rate"
+        - "inf"

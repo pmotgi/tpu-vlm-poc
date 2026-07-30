@@ -1,47 +1,35 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: gemma4-31b-vllm-tpu
+  name: gemma4-vllm-tpu-v6e
   namespace: default
-  labels:
-    app: gemma4-31b-vllm-tpu
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: gemma4-31b-vllm-tpu
+      app: gemma4-vllm-tpu-v6e
   template:
     metadata:
       labels:
-        app: gemma4-31b-vllm-tpu
-      annotations:
-        gke-gcsfuse/volumes: "true"
+        app: gemma4-vllm-tpu-v6e
     spec:
       serviceAccountName: workload-identity-k8s-sa
       nodeSelector:
-        cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-1t
-        cloud.google.com/gke-tpu-accelerator: tpu7x
-        cloud.google.com/gke-tpu-topology: 1x1x1
+        cloud.google.com/gke-nodepool: v6e-8t-dws-flex
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
       tolerations:
       - key: google.com/tpu
         operator: Exists
         effect: NoSchedule
       - key: cloud.google.com/gke-spot
-        operator: Equal
-        value: "true"
+        operator: Exists
         effect: NoSchedule
-
-      initContainers:
-      - name: copy-model
-        image: vllm/vllm-tpu:latest
-        command: ['sh', '-c', 'cp -r /gcs/models--google--gemma-4-31b-it /data/ || true']
-        volumeMounts:
-        - mountPath: "/data"
-          name: data-volume
-        - mountPath: /gcs
-          name: gcs-bucket
+      - key: cloud.google.com/gke-dws
+        operator: Exists
+        effect: NoSchedule
       containers:
       - name: vllm-tpu
         image: vllm/vllm-tpu:latest
@@ -51,84 +39,69 @@ spec:
         - --port=8000
         - --seed=42
         - --model=google/gemma-4-31b-it
-        - --trust-remote-code
-        - --tensor-parallel-size=2
-        - --data-parallel-size=1
-        - --max-num-batched-tokens=16384
-        - --gpu-memory-utilization=0.90
-        - --max-num-seqs=256
         - --max-model-len=16384
-        - --async-scheduling
-        - --download-dir=/data
-        - --reasoning-parser=gemma4
+        - --max-num-seqs=256
+        - --data-parallel-size=2
+        - --tensor-parallel-size=4
+        - --max-num-batched-tokens=16384
         - --no-enable-prefix-caching
         - --kv-cache-dtype=fp8
+        - --gpu-memory-utilization=0.9
+        - --async-scheduling
         - "--limit-mm-per-prompt={\"image\": 1, \"video\": 0, \"audio\": 0}"
         - --block-size=256
         - "--additional-config={\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
-
+        - --trust-remote-code
         env:
-        - name: HF_HUB_ENABLE_HF_TRANSFER
-          value: "1"
-        - name: MODEL_IMPL_TYPE
-          value: "flax_nnx"
         - name: VLLM_ENGINE_READY_TIMEOUT_S
           value: "1800"
         - name: TPU_MULTIPROCESS_DP
           value: "1"
+        - name: USE_BATCHED_RPA_KERNEL
+          value: "1"
+        - name: MODEL_IMPL_TYPE
+          value: "flax_nnx"
         - name: HF_HOME
-          value: /gcs
-        - name: HUGGING_FACE_HUB_TOKEN
+          value: /data
+        - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
               name: hf-secret
               key: hf_api_token
-        - name: LAYOUT_Q_PROJ_AS_NDH
-          value: "1"
-        - name: USE_BATCHED_RPA_KERNEL
-          value: "1"
         ports:
         - containerPort: 8000
         resources:
           limits:
-            google.com/tpu: '1'
+            google.com/tpu: '8'
           requests:
-            google.com/tpu: '1'
+            google.com/tpu: '8'
         readinessProbe:
           tcpSocket:
             port: 8000
-          initialDelaySeconds: 180
+          initialDelaySeconds: 15
           periodSeconds: 10
-          failureThreshold: 60
         volumeMounts:
         - mountPath: "/data"
           name: data-volume
         - mountPath: /dev/shm
           name: dshm
-        - mountPath: /gcs
-          name: gcs-bucket
       volumes:
-      - name: dshm
-        emptyDir:
+      - emptyDir:
           medium: Memory
+        name: dshm
       - name: data-volume
         emptyDir:
           medium: Memory
           sizeLimit: 250Gi
-      - name: gcs-bucket
-        csi:
-          driver: gcsfuse.csi.storage.gke.io
-          volumeAttributes:
-            bucketName: checkpoint-data-pmotgi-tpu-v7x-04a179d1
-            mountOptions: "implicit-dirs"
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: gemma4-31b-vllm-service
+  name: gemma4-vllm-tpu-v6e-service
+  namespace: default
 spec:
   selector:
-    app: gemma4-31b-vllm-tpu
+    app: gemma4-vllm-tpu-v6e
   type: LoadBalancer
   ports:
     - name: http
