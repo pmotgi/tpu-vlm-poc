@@ -1,0 +1,82 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-suite-g4
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: benchmark-suite-g4
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: g4-48-spot-pool
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: vllm/vllm-openai:latest
+        command:
+        - "/bin/sh"
+        - "-c"
+        - |
+          set -e
+          echo "=========================================================="
+          echo "Starting Multimodal Benchmark Suite for NVIDIA RTX 6000 Pro (TP=1) Deployment"
+          echo "Target Endpoint: http://gemma4-vllm-g4-service:8000"
+          echo "=========================================================="
+          configs="
+          128 128
+          512 512
+          1024 1024
+          2048 128
+          4096 128
+          6000 128
+          8192 1024
+          512 2048
+          2048 2048
+          "
+          echo "$configs" | while read -r in_len out_len; do
+            if [ -z "$in_len" ]; then continue; fi
+            echo ""
+            echo "----------------------------------------------------------"
+            echo "=== Running Config -> Input Tokens: $in_len | Output Tokens: $out_len ==="
+            echo "----------------------------------------------------------"
+            vllm bench serve \
+              --backend openai-chat \
+              --base-url http://gemma4-vllm-g4-service:8000 \
+              --endpoint /v1/chat/completions \
+              --model google/gemma-4-31b-it \
+              --dataset-name random-mm \
+              --random-mm-base-items-per-request 1 \
+              --random-input-len "$in_len" \
+              --random-output-len "$out_len" \
+              --num-prompts 150 \
+              --insecure \
+              --trust-remote-code || echo "Benchmark failed for ${in_len}/${out_len}"
+          done
+          echo "=========================================================="
+          echo "Benchmark Suite Completed Successfully!"
+          echo "=========================================================="
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        resources:
+          requests:
+            cpu: "4"
+            memory: "8Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"

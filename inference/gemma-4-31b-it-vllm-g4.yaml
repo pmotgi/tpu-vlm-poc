@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma4-vllm-g4
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemma4-vllm-g4
+  template:
+    metadata:
+      labels:
+        app: gemma4-vllm-g4
+    spec:
+      serviceAccountName: default
+      nodeSelector:
+        cloud.google.com/gke-nodepool: g4-48-spot-pool
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm-server
+        image: vllm/vllm-openai:latest
+        imagePullPolicy: Always
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - --host=0.0.0.0
+        - --port=8000
+        - --seed=42
+        - --model=google/gemma-4-31b-it
+        - --max-model-len=16384
+        - --max-num-seqs=256
+        - --tensor-parallel-size=1
+        - --max-num-batched-tokens=16384
+        - --no-enable-prefix-caching
+        - --kv-cache-dtype=fp8
+        - --gpu-memory-utilization=0.9
+        - --async-scheduling
+        - "--limit-mm-per-prompt={\"image\": 1, \"video\": 0, \"audio\": 0}"
+        - --block-size=256
+        - "--additional-config={\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+        - --trust-remote-code
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        - name: VLLM_ENGINE_READY_TIMEOUT_S
+          value: "1800"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            memory: "128Gi"
+            cpu: "16"
+          requests:
+            nvidia.com/gpu: "1"
+            memory: "128Gi"
+            cpu: "16"
+        ports:
+        - containerPort: 8000
+          name: http
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 60
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: gemma4-g4-cache-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gemma4-g4-cache-pvc
+  namespace: default
+spec:
+  storageClassName: hyperdisk-balanced
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma4-vllm-g4-service
+  namespace: default
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+  selector:
+    app: gemma4-vllm-g4

@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma4-vllm-tpu-v5p-tp2
+  namespace: default
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gemma4-vllm-tpu-v5p-tp2
+  template:
+    metadata:
+      labels:
+        app: gemma4-vllm-tpu-v5p-tp2
+    spec:
+      serviceAccountName: workload-identity-k8s-sa
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v5p-4t-spot
+        cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+      - key: cloud.google.com/gke-spot
+        operator: Exists
+        effect: NoSchedule
+      - key: cloud.google.com/gke-dws
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm-tpu
+        image: vllm/vllm-tpu:latest
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - --host=0.0.0.0
+        - --port=8000
+        - --seed=42
+        - --model=google/gemma-4-31b-it
+        - --max-model-len=4096
+        - --max-num-seqs=256
+        - --data-parallel-size=1
+        - --tensor-parallel-size=2
+        - --max-num-batched-tokens=4096
+        - --no-enable-prefix-caching
+        - --kv-cache-dtype=fp8
+        - --gpu-memory-utilization=0.9
+        - --async-scheduling
+        - "--limit-mm-per-prompt={\"image\": 1, \"video\": 0, \"audio\": 0}"
+        - --block-size=256
+        - "--additional-config={\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+        - --trust-remote-code
+        env:
+        - name: VLLM_ENGINE_READY_TIMEOUT_S
+          value: "1800"
+        - name: TPU_MULTIPROCESS_DP
+          value: "0"
+        - name: USE_BATCHED_RPA_KERNEL
+          value: "0"
+        - name: MODEL_IMPL_TYPE
+          value: "flax_nnx"
+        - name: HF_HOME
+          value: /data
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            google.com/tpu: '4'
+          requests:
+            google.com/tpu: '4'
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 60
+        volumeMounts:
+        - mountPath: "/data"
+          name: data-volume
+        - mountPath: /dev/shm
+          name: dshm
+      volumes:
+      - emptyDir:
+          medium: Memory
+        name: dshm
+      - name: data-volume
+        emptyDir:
+          medium: Memory
+          sizeLimit: 250Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma4-vllm-tpu-v5p-tp2-service
+  namespace: default
+spec:
+  selector:
+    app: gemma4-vllm-tpu-v5p-tp2
+  type: LoadBalancer
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000

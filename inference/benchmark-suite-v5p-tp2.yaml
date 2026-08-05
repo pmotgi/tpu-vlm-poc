@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-suite-v5p-tp2
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: benchmark-suite-v5p-tp2
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: vllm/vllm-tpu:latest
+        command:
+        - "/bin/sh"
+        - "-c"
+        - |
+          set -e
+          echo "=========================================================="
+          echo "Starting Multimodal Benchmark Suite for v5p (TP=2) Deployment"
+          echo "Target Endpoint: http://gemma4-vllm-tpu-v5p-tp2-service:8000"
+          echo "=========================================================="
+          # Testing all benchmark sequence lengths where in_len + out_len <= 4096 (max-model-len)
+          configs="
+          128 128
+          512 512
+          1024 1024
+          2048 128
+          512 2048
+          2048 2048
+          "
+          echo "$configs" | while read -r in_len out_len; do
+            if [ -z "$in_len" ]; then continue; fi
+            echo ""
+            echo "----------------------------------------------------------"
+            echo "=== Running Config -> Input Tokens: $in_len | Output Tokens: $out_len ==="
+            echo "----------------------------------------------------------"
+            vllm bench serve \
+              --backend openai-chat \
+              --base-url http://gemma4-vllm-tpu-v5p-tp2-service:8000 \
+              --endpoint /v1/chat/completions \
+              --model google/gemma-4-31b-it \
+              --dataset-name random-mm \
+              --random-mm-base-items-per-request 1 \
+              --num-prompts 150 \
+              --random-input-len "$in_len" \
+              --random-output-len "$out_len" \
+              --request-rate inf
+            sleep 5
+          done
+          echo "=========================================================="
+          echo "Benchmark Suite Completed Successfully!"
+          echo "=========================================================="

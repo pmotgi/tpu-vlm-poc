@@ -18,8 +18,11 @@ This repository contains end-to-end configurations, Kubernetes manifests, and de
 │   ├── hf-conversion-pod.yaml                  # Converts trained adapters back to HF format
 │   └── README.md                               # Detailed training workflow documentation
 └── inference/
-    ├── vllm-deployment.yaml       # vLLM OpenAI API deployment with LoRA support
-    └── README.md                  # Inference setup and serving guide
+    ├── gemma-4-31b-it-vllm-*.yaml # vLLM serving manifests for TPUs (v6e, v5p, v7x) and GPUs (RTX 6000 Pro, H100)
+    ├── benchmark-suite-*.yaml     # Automated 9-config benchmark suites across all deployments
+    ├── BENCHMARK_REPORT_TABLES.md # 7-Way comparative tabular report (tok/s, TTFT, TPOT)
+    ├── BENCHMARK_REPORT_GRAPHS.md # 7-Way visual graph comparison charts
+    └── README.md                  # Inference setup and benchmarking guide
 ```
 
 ---
@@ -37,7 +40,10 @@ Demonstrates distributed fine-tuning of **Llama 3.3 70B** on Google Cloud TPUs u
 4. **Hugging Face Export**: Convert learned LoRA weights into Hugging Face compatible format for downstream serving.
 
 ### 3. Model Serving & Inference (`inference/`)
-Demonstrates high-throughput serving of large language models and LoRA adapters on TPUs using **vLLM** (`tpu-inference`). Configures tensor parallelism, dynamic LoRA loading, and Kubernetes Service load balancing.
+Demonstrates high-throughput serving of large language models on Google Cloud TPUs (**v6e**, **v5p**, **v7x**) and NVIDIA GPUs (**RTX 6000 Pro**, **H100**) using **vLLM** (`tpu-inference`). Includes:
+1. **7-Way Hardware Comparison Suite**: End-to-end benchmarking across 5 TPU and 2 NVIDIA GPU deployments.
+2. **Automated 9-Config Sequence Matrix**: Standardized evaluation from short prompts (`128/128`) to long context (`8192/1024`, `512/2048`, `2048/2048`).
+3. **Comprehensive Reports & Charts**: Detailed tabular analysis ([`BENCHMARK_REPORT_TABLES.md`](file:///Users/pmotgi/exploration/cerence/inference/BENCHMARK_REPORT_TABLES.md)) and visual comparison graphs ([`BENCHMARK_REPORT_GRAPHS.md`](file:///Users/pmotgi/exploration/cerence/inference/BENCHMARK_REPORT_GRAPHS.md)).
 
 ---
 
@@ -72,9 +78,16 @@ kubectl apply -f training/llama3-3-70b-checkpoint-validation.yaml
 kubectl apply -f training/hf-conversion-pod.yaml
 ```
 
-### 3. Serve Model via vLLM
+### 3. Serve Model via vLLM & Run Benchmark Suite
 ```bash
-kubectl apply -f inference/vllm-deployment.yaml
+# 1. Deploy vLLM Serving Endpoint (e.g., NVIDIA H100 or TPU v7x)
+kubectl apply -f inference/gemma-4-31b-it-vllm-h100.yaml
+
+# 2. Run Automated Benchmarking Suite
+kubectl apply -f inference/benchmark-suite-h100.yaml
+
+# 3. Monitor Benchmark Progress
+kubectl logs -f job/benchmark-suite-h100
 ```
 
 ---
