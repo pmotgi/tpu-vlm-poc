@@ -6,7 +6,7 @@ This report presents detailed benchmarking comparison results for serving **`goo
 3. **TPU v5p-4 (4 Chips - `TP=4, DP=1`)**
 4. **TPU v5p-2 (2 Chips - `TP=2, DP=1`)**
 5. **TPU v7x (1 Pod - `TP=2, DP=1`)**
-6. **NVIDIA RTX 6000 Pro (1 Chip - `TP=1`, 48 GB VRAM)**
+6. **NVIDIA RTX 6000 Pro (1 Chip - `TP=1`, 96 GB VRAM)**
 7. **NVIDIA H100 (1 Chip - `TP=1`, 80 GB VRAM)**
 
 > [!NOTE]
@@ -57,7 +57,7 @@ This report presents detailed benchmarking comparison results for serving **`goo
 - **Benchmark Suite Manifest**: [benchmark-suite-v7x.yaml](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v7x.yaml)
 
 ### F. NVIDIA RTX 6000 Pro Deployment Stamp (1 GPU Chip)
-- **Accelerator Target**: NVIDIA RTX 6000 Pro Ada Generation (48 GB VRAM), 1 GPU chip
+- **Accelerator Target**: NVIDIA RTX 6000 Pro Ada Generation (96 GB VRAM), 1 GPU chip
 - **Node Pool**: `g4-48-spot-pool` (`g4-standard-48`)
 - **Parallelism Strategy**: Tensor Parallelism = 1 (`TP=1`), Data Parallelism = 1 (`DP=1`), `--max-model-len=16384`
 - **KV Cache / Quantization**: `fp8` KV cache, QWIX FP8 weights/activations (`float8_e4m3fn`)
@@ -80,7 +80,7 @@ This report presents detailed benchmarking comparison results for serving **`goo
 
 ### Table 1: Output Token Throughput (tokens/sec) — *Higher is better*
 
-| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 48 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
+| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 96 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **128 / 128** | **619.54** | 569.74 | 792.40 | 640.27 | 665.03 | 424.05 | **1,737.35** |
 | **512 / 512** | **472.07** | 611.33 | **2,788.31** | 1,365.50 | 1,844.15 | 808.04 | 2,567.96 |
@@ -96,7 +96,7 @@ This report presents detailed benchmarking comparison results for serving **`goo
 
 ### Table 2: Total Token Throughput (tokens/sec) — *Higher is better*
 
-| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 48 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
+| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 96 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **128 / 128** | **2,571.15** | 2,364.47 | 3,288.56 | 2,657.20 | 2,759.95 | 1,759.84 | **7,210.17** |
 | **512 / 512** | **1,198.08** | 1,551.52 | **7,076.58** | 3,465.56 | 4,680.34 | 2,050.76 | 6,517.32 |
@@ -114,7 +114,7 @@ This report presents detailed benchmarking comparison results for serving **`goo
 
 ### Table 3: Mean Time to First Token (TTFT in seconds) — *Lower is better*
 
-| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 48 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
+| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 96 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **128 / 128** | **15.13 s** | 14.35 s | 18.78 s | 20.97 s | 21.22 s | 22.17 s | **5.42 s** |
 | **512 / 512** | **68.98 s** | 44.71 s | **7.30 s** | 11.34 s | 12.47 s | 15.69 s | 8.07 s |
@@ -130,7 +130,7 @@ This report presents detailed benchmarking comparison results for serving **`goo
 
 ### Table 4: Mean Time per Output Token (TPOT in ms) — *Lower is better*
 
-| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 48 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
+| Input / Output Tokens (ISL / OSL) | **H100 (`TP=1`, 80 GB)** | **RTX 6000 Pro (`TP=1`, 96 GB)** | v6e-8 (`TP=4, DP=2`, 8 chips) | v6e-4 (`TP=4, DP=1`, 4 chips) | v5p-4 (`TP=4, DP=1`, 4 chips) | v5p-2 (`TP=2, DP=1`, 2 chips) | v7x (`TP=2, DP=1`) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **128 / 128** | **39.84 ms** | 91.90 ms | **40.10 ms** | 69.18 ms | 58.63 ms | 177.26 ms | 42.91 ms |
 | **512 / 512** | **39.82 ms** | 77.65 ms | **38.46 ms** | 73.81 ms | 56.54 ms | 153.52 ms | 42.27 ms |
