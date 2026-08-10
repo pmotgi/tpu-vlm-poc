@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lora-hf-conversion
+  namespace: default
+  annotations:
+    gke-gcsfuse/volumes: "true"
+spec:
+  restartPolicy: Never
+  serviceAccountName: workload-identity-k8s-sa
+  automountServiceAccountToken: true
+  containers:
+  - name: converter
+    image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+    securityContext:
+      privileged: true
+      runAsUser: 0
+      runAsGroup: 100
+    env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-secret
+          key: hf_api_token
+    command:
+    - bash
+    - -c
+    - |
+      set -e
+      unset KUBERNETES_SERVICE_HOST
+      unset KUBERNETES_SERVICE_PORT
+      export JAX_PLATFORMS=cpu
+      export JAX_COORDINATOR_ADDRESS="127.0.0.1:8482"
+      export JAX_PROCESS_COUNT=1
+      export JAX_NUM_PROCESSES=1
+      export JAX_PROCESS_INDEX=0
+      export JAX_PROCESS_ID=0
+      export MODEL="llama3.3-70b"
+      export BASE_OUTPUT_DIRECTORY="/checkpoint/llama3.3-70b/lora_training"
+      export RUN_NAME="llama3-3-70b-lora-2x2x2-bs16"
+      
+      echo "=== Installing Tunix ==="
+      pip install --no-cache-dir https://github.com/google/tunix/archive/refs/heads/main.zip
+      
+      echo "=== Converting LoRA weights to Hugging Face format ==="
+      python3 -m maxtext.checkpoint_conversion.to_huggingface \
+        model_name=llama3.1-70b \
+        lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints/24/model_params \
+        lora.lora_rank=16 \
+        lora.lora_alpha=32.0 \
+        base_output_directory=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/hf_lora_adapter \
+        hf_access_token=${HF_TOKEN} \
+        skip_jax_distributed_system=True
+      
+      echo "=== Conversion Complete! ==="
+    volumeMounts:
+    - mountPath: /checkpoint
+      name: gcs-input
+  volumes:
+  - name: gcs-input
+    persistentVolumeClaim:
+      claimName: checkpoint-data-cerence-gke-test-tbd-6e9665fd-pvc

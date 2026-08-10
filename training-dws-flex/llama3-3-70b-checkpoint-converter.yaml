@@ -1,0 +1,125 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: llama3-3-70b-checkpoint-converter
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: dws-local-queue
+  annotations:
+    provreq.kueue.x-k8s.io/maxRunDurationSeconds: '3600'
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: slice
+    template:
+      metadata:
+        labels:
+          app: llama3-3-70b-checkpoint-converter
+      spec:
+        parallelism: 2
+        completions: 2
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              app: llama3-3-70b-checkpoint-converter
+              kueue.x-k8s.io/queue-name: dws-local-queue
+            annotations:
+              gke-gcsfuse/volumes: 'true'
+          spec:
+            schedulerName: default-scheduler
+            restartPolicy: Never
+            serviceAccountName: workload-identity-k8s-sa
+            automountServiceAccountToken: true
+            nodeSelector:
+              cloud.google.com/gke-accelerator-count: '4'
+              cloud.google.com/gke-nodepool: gke-tpu-7x-pool
+              cloud.google.com/gke-tpu-accelerator: tpu7x
+              cloud.google.com/gke-tpu-topology: 2x2x2
+              cloud.google.com/gke-queued: 'true'
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            - key: cloud.google.com/gke-queued
+              operator: Equal
+              value: 'true'
+              effect: NoSchedule
+            initContainers:
+            - name: scanned-converter
+              image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+              securityContext:
+                privileged: true
+              command:
+              - bash
+              - -c
+              - "set -e\nexport SCANNED_PATH=\"/checkpoint/maxtext/llama3.3-70b/scanned_chkpt\"\
+                \necho \"=== [initContainer: scanned-converter] Checking if scanned\
+                \ Orbax checkpoint already exists on GCS ===\"\nif [ -f \"${SCANNED_PATH}/0/items/manifest.ocdbt\"\
+                \ ] || [ -d \"${SCANNED_PATH}/0/items\" ]; then\n  echo \"Scanned\
+                \ Orbax checkpoint already found at ${SCANNED_PATH}/0/items. Skipping\
+                \ scanned conversion!\"\nelse\n  echo \"Scanned conversion required\
+                \ or pending.\"\nfi\n"
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /checkpoint
+                name: gcs-vol
+            containers:
+            - name: unscanned-converter
+              image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+              securityContext:
+                privileged: true
+              command:
+              - bash
+              - -c
+              - "set -e\nPOD_INDEX=${JOB_COMPLETION_INDEX:-$(echo \"${HOSTNAME:-$POD_NAME}\"\
+                \ | awk -F'-' '{print $NF}')}\necho \"=== [container: unscanned-converter]\
+                \ Running on Pod Index ${POD_INDEX} across 2x2x2 TPU mesh ===\"\n\n\
+                export TPU_STDERR_LOG_LEVEL=0\nexport TPU_MIN_LOG_LEVEL=0\nexport\
+                \ TF_CPP_MIN_LOG_LEVEL=0\nexport JAX_PLATFORMS='tpu,cpu'\nexport ENABLE_PJRT_COMPATIBILITY='true'\n\
+                export GOOGLE_CLOUD_PROJECT=\"northam-ce-mlai-tpu\"\nexport SCANNED_PATH=\"\
+                /checkpoint/maxtext/llama3.3-70b/scanned_chkpt\"\nexport UNSCANNED_DIR=\"\
+                /checkpoint/maxtext/llama3.3-70b\"\n\necho \"=== 1. Checking if unscanned\
+                \ Orbax checkpoint already exists on GCS ===\"\nif [ -f \"${UNSCANNED_DIR}/unscanned_chkpt/checkpoints/0/items/manifest.ocdbt\"\
+                \ ]; then\n  echo \"Unscanned Orbax checkpoint already exists. Skipping\
+                \ unscanned conversion!\"\nelse\n  echo \"=== 2. Generating Unscanned\
+                \ Parameter-Only Checkpoint directly on PVC (${UNSCANNED_DIR}/unscanned_chkpt)\
+                \ across 2x2x2 TPU slice ===\"\n  cd /deps/src || cd / || true\n \
+                \ export MAXTEXT_CONFIGS=\"maxtext/configs/base.yml\"\n  if [ ! -f\
+                \ \"$MAXTEXT_CONFIGS\" ]; then\n    export MAXTEXT_CONFIGS=\"src/maxtext/configs/base.yml\"\
+                \n  fi\n  \n  # Clean any partial checkpoints on Pod 0 before starting\
+                \ JAX, and sleep 5s on Pod 1 to prevent gcsfuse race conditions\n\
+                \  if [ \"$POD_INDEX\" = \"0\" ]; then\n    echo \"Pod 0 cleaning\
+                \ old/partial unscanned checkpoint directory...\"\n    rm -rf \"${UNSCANNED_DIR}/unscanned_chkpt/checkpoints\"\
+                \ 2>/dev/null || true\n  else\n    echo \"Pod 1 waiting 5s for Pod\
+                \ 0 directory cleanup...\"\n    sleep 5\n  fi\n  \n  # Disable path.rmtree()\
+                \ inside generate_param_only_checkpoint.py so gcsfuse does not raise\
+                \ Errno 5 across multiple TPU pods\n  python3 -c \"import os; p='/deps/src/maxtext/utils/generate_param_only_checkpoint.py';\
+                \ (code := open(p).read(), open(p,'w').write(code.replace('if jax.process_index()\
+                \ == 0:\\n      path.rmtree()', 'pass'))) if os.path.exists(p) else\
+                \ None\"\n  \n  python3 -m maxtext.utils.generate_param_only_checkpoint\
+                \ \\\n    \"${MAXTEXT_CONFIGS}\" \\\n    async_checkpointing=false\
+                \ \\\n    base_output_directory=\"${UNSCANNED_DIR}\" \\\n    load_parameters_path=\"\
+                ${SCANNED_PATH}/0/items\" \\\n    run_name=\"unscanned_chkpt\" \\\n\
+                \    model_name=\"llama3.3-70b\" \\\n    force_unroll=true\nfi\necho\
+                \ \"=== Checkpoint Conversion Complete across 2x2x2 slice! ===\"\n"
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /checkpoint
+                name: gcs-vol
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: gcs-vol
+              persistentVolumeClaim:
+                claimName: checkpoint-data-cerence-gke-test-tbd-6e9665fd-pvc

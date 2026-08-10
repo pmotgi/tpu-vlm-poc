@@ -1,0 +1,71 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llama3-3-70b-checkpoint-validation
+  namespace: default
+spec:
+  template:
+    metadata:
+      labels:
+        app: llama3-3-70b-checkpoint-validation
+      annotations:
+        gke-gcsfuse/volumes: 'true'
+    spec:
+      schedulerName: default-scheduler
+      restartPolicy: Never
+      serviceAccountName: workload-identity-k8s-sa
+      automountServiceAccountToken: true
+      nodeSelector:
+        cloud.google.com/gke-accelerator-count: '4'
+        cloud.google.com/gke-nodepool: tpu-v7x-spot-2x2x1
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: validator
+        image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+        securityContext:
+          privileged: true
+        command:
+        - bash
+        - -c
+        - "set -e\necho \"=== Running Llama 3.3 70B Checkpoint Validation across 2x2x1\
+          \ TPU slice (${HOSTNAME}) ===\"\n\nexport TPU_STDERR_LOG_LEVEL=0\nexport\
+          \ TPU_MIN_LOG_LEVEL=0\nexport TF_CPP_MIN_LOG_LEVEL=0\nexport JAX_PLATFORMS='tpu,cpu'\n\
+          export ENABLE_PJRT_COMPATIBILITY='true'\nexport GOOGLE_CLOUD_PROJECT=\"\
+          northam-ce-mlai-tpu\"\nexport CKPT_PATH=\"/checkpoint/maxtext/llama3.3-70b/unscanned_chkpt/checkpoints/0/items\"\
+          \n\ncd /deps/src || cd / || true\nexport MAXTEXT_CONFIGS=\"maxtext/configs/base.yml\"\
+          \nif [ ! -f \"$MAXTEXT_CONFIGS\" ]; then\n  export MAXTEXT_CONFIGS=\"src/maxtext/configs/base.yml\"\
+          \nfi\nexport TOKENIZER_PATH=\"maxtext/assets/tokenizers/tokenizer_llama3.tiktoken\"\
+          \nif [ ! -f \"$TOKENIZER_PATH\" ]; then\n  export TOKENIZER_PATH=\"src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken\"\
+          \nfi\n\necho \"=== Running MaxText Distributed Decode Verification from\
+          \ PVC (${CKPT_PATH}) ===\"\nJAX_PLATFORMS=tpu python3 -m maxtext.inference.decode\
+          \ \\\n  \"${MAXTEXT_CONFIGS}\" \\\n  tokenizer_path=\"${TOKENIZER_PATH}\"\
+          \ \\\n  tokenizer_type=tiktoken \\\n  load_parameters_path=\"${CKPT_PATH}\"\
+          \ \\\n  per_device_batch_size=1 \\\n  run_name=\"validate_decode_$(date\
+          \ +%Y%m%d_%H%M%S)\" \\\n  max_prefill_predict_length=8 \\\n  max_target_length=24\
+          \ \\\n  dataset_type=synthetic \\\n  async_checkpointing=false \\\n  model_name=\"\
+          llama3.3-70b\" \\\n  ici_fsdp_parallelism=1 \\\n  ici_autoregressive_parallelism=-1\
+          \ \\\n  attention=dot_product \\\n  scan_layers=false \\\n  prompt=\"I love\
+          \ to read books because\"\n\necho \"=== Decode Validation Finished Successfully!\
+          \ ===\"\n"
+        resources:
+          limits:
+            google.com/tpu: '4'
+          requests:
+            google.com/tpu: '4'
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /checkpoint
+          name: gcs-vol
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: gcs-vol
+        persistentVolumeClaim:
+          claimName: checkpoint-data-cerence-gke-test-tbd-6e9665fd-pvc
