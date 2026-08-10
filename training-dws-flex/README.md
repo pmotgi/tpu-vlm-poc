@@ -73,6 +73,34 @@ Upon successful completion (`STATUS: Completed`), converted Hugging Face adapter
 `/checkpoint/llama3.3-70b/lora_training/llama3-3-70b-lora-2x2x2-bs16/hf_lora_adapter`
 (which corresponds to `gs://checkpoint-data-cerence-gke-test-tbd-6e9665fd/llama3.3-70b/lora_training/llama3-3-70b-lora-2x2x2-bs16/hf_lora_adapter`).
 
+## Building and Pushing the MaxText Container Image
+
+To build the MaxText runner image and push it to Google Artifact Registry for use in GKE workloads:
+
+### 1. Create Artifact Registry Repository
+```bash
+gcloud artifacts repositories create pmotgi-vlm-poc-repo \
+  --repository-format=docker \
+  --location=us-east5 \
+  --description="Docker repository for MaxText runner images" \
+  --project=northam-ce-mlai-tpu
+```
+
+### 2. Authenticate Docker
+```bash
+gcloud auth configure-docker us-east5-docker.pkg.dev
+```
+
+### 3. Build Container Image
+```bash
+docker build -t us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest -f Dockerfile .
+```
+
+### 4. Push Image to Artifact Registry
+```bash
+docker push us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest
+```
+
 ---
 
 ## Adding a 4x4 `ct6e-standard-4t` (TPU v6e) Node Pool
