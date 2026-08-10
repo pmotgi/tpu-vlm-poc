@@ -91,8 +91,10 @@ gcloud artifacts repositories create pmotgi-vlm-poc-repo \
 gcloud auth configure-docker us-east5-docker.pkg.dev
 ```
 
-### 3. Build Container Image
+### 3. Clone MaxText and Build Container Image
 ```bash
+git clone https://github.com/google/maxtext.git
+cd maxtext
 docker build -t us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:latest -f Dockerfile .
 ```
 
