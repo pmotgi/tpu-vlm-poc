@@ -1,11 +1,11 @@
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: tpu-v6e-4x4-flavor
+  name: tpu-v6e-8x8-flavor
 spec:
   nodeLabels:
-    cloud.google.com/gke-tpu-accelerator: ct6e
-    cloud.google.com/gke-tpu-topology: 4x4
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 8x8
   tolerations:
   - effect: NoSchedule
     key: google.com/tpu
@@ -18,45 +18,46 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ProvisioningRequestConfig
 metadata:
-  name: dws-v6e-4x4-config
+  name: dws-v6e-8x8-config
 spec:
   provisioningClassName: queued-provisioning.gke.io
   managedResources:
   - google.com/tpu
   parameters:
-    tpu-topology: "4x4"
+    tpu-topology: "8x8"
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: AdmissionCheck
 metadata:
-  name: dws-v6e-4x4-prov
+  name: dws-v6e-8x8-prov
 spec:
   controllerName: kueue.x-k8s.io/provisioning-request
   parameters:
     apiGroup: kueue.x-k8s.io
     kind: ProvisioningRequestConfig
-    name: dws-v6e-4x4-config
+    name: dws-v6e-8x8-config
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
-  name: cluster-queue-v6e-4x4
+  name: cluster-queue-v6e-8x8
 spec:
   namespaceSelector: {}
   resourceGroups:
   - coveredResources: ["google.com/tpu"]
     flavors:
-    - name: tpu-v6e-4x4-flavor
+    - name: tpu-v6e-8x8-flavor
       resources:
       - name: google.com/tpu
-        nominalQuota: 16
-  admissionChecks:
-  - dws-v6e-4x4-prov
+        nominalQuota: 64
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: dws-v6e-8x8-prov
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   namespace: default
-  name: dws-v6e-4x4-local-queue
+  name: dws-v6e-8x8-local-queue
 spec:
-  clusterQueue: cluster-queue-v6e-4x4
+  clusterQueue: cluster-queue-v6e-8x8

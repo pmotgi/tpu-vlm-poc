@@ -1,13 +1,13 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: llama3-3-70b-lora-training
+  name: llama3-3-70b-lora-training-8x8
   namespace: default
   annotations:
     alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
-    provreq.kueue.x-k8s.io/maxRunDurationSeconds: '3600'
+    provreq.kueue.x-k8s.io/maxRunDurationSeconds: "3600"
   labels:
-    kueue.x-k8s.io/queue-name: dws-local-queue
+    kueue.x-k8s.io/queue-name: dws-v6e-8x8-local-queue
 spec:
   failurePolicy:
     maxRestarts: 0
@@ -16,18 +16,18 @@ spec:
       template:
         metadata:
           labels:
-            app: llama3-3-70b-lora-training
+            app: llama3-3-70b-lora-training-8x8
         spec:
-          parallelism: 2
-          completions: 2
+          parallelism: 16
+          completions: 16
           backoffLimit: 0
           template:
             metadata:
               labels:
-                app: llama3-3-70b-lora-training
-                kueue.x-k8s.io/queue-name: dws-local-queue
+                app: llama3-3-70b-lora-training-8x8
+                kueue.x-k8s.io/queue-name: dws-v6e-8x8-local-queue
               annotations:
-                gke-gcsfuse/volumes: 'true'
+                gke-gcsfuse/volumes: "true"
             spec:
               schedulerName: default-scheduler
               restartPolicy: Never
@@ -38,18 +38,26 @@ spec:
               serviceAccountName: workload-identity-k8s-sa
               automountServiceAccountToken: true
               nodeSelector:
-                cloud.google.com/gke-accelerator-count: '4'
-                cloud.google.com/gke-nodepool: gke-tpu-7x-pool
-                cloud.google.com/gke-tpu-accelerator: tpu7x
-                cloud.google.com/gke-tpu-topology: 2x2x2
-                cloud.google.com/gke-queued: 'true'
+                cloud.google.com/gke-nodepool: gke-tpu-v6e-8x8-pool-a
+                cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+                cloud.google.com/gke-tpu-topology: 8x8
+                cloud.google.com/gke-queued: "true"
+              affinity:
+                nodeAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                    nodeSelectorTerms:
+                      - matchExpressions:
+                          - key: cloud.google.com/gke-nodepool
+                            operator: In
+                            values:
+                              - gke-tpu-v6e-8x8-pool-a
               tolerations:
                 - key: google.com/tpu
                   operator: Exists
                   effect: NoSchedule
                 - key: cloud.google.com/gke-queued
                   operator: Equal
-                  value: 'true'
+                  value: "true"
                   effect: NoSchedule
               containers:
                 - name: lora-trainer
@@ -70,7 +78,7 @@ spec:
                     - |
                       set -e
                       POD_INDEX=${JOB_COMPLETION_INDEX:-$(echo "${HOSTNAME:-$POD_NAME}" | awk -F'-' '{print $NF}')}
-                      echo "=== [container: lora-trainer] Running Pod Index ${POD_INDEX} across 2x2x2 TPU mesh (${HOSTNAME}) ==="
+                      echo "=== [container: lora-trainer] Running Pod Index ${POD_INDEX} across 8x8 TPU mesh (${HOSTNAME}) ==="
 
                       export TPU_STDERR_LOG_LEVEL=0
                       export TPU_MIN_LOG_LEVEL=0
@@ -83,7 +91,7 @@ spec:
                       export MODEL="llama3.3-70b"
                       export MAXTEXT_CKPT_PATH="/checkpoint/maxtext/llama3.3-70b/scanned_chkpt/0/items"
                       export BASE_OUTPUT_DIRECTORY="/checkpoint/llama3.3-70b/lora_training"
-                      export RUN_NAME="llama3-3-70b-lora-2x2x2-bs16"
+                      export RUN_NAME="llama3-3-70b-lora-8x8-bs16"
 
                       # -- Dataset Configuration --
                       export DATASET_NAME="openai/gsm8k"
@@ -103,7 +111,7 @@ spec:
                       pip install --no-cache-dir https://github.com/google/tunix/archive/refs/heads/main.zip
 
                       echo "=== Patching Tunix multi-host resharding for non-Pathways TPU mesh ==="
-                      python3 -c 'import re; p="/usr/local/lib/python3.12/site-packages/tunix/rl/reshard.py"; c=open(p).read(); new="def _get_reshard_fn_jax_device_put(*, donate: bool, cache_resharding_plans: bool = False, use_experimental_pre_reshard: bool = False):\n  import functools\n  @functools.lru_cache(maxsize=1024)\n  def _get_jitted(in_spec, out_spec):\n    return jax.jit(lambda arr: arr, in_shardings=in_spec, out_shardings=out_spec)\n  def _reshard_leaf(leaf, leaf_sharding):\n    if not isinstance(leaf, jax.Array):\n      return leaf\n    if hasattr(leaf, \"sharding\") and leaf.sharding == leaf_sharding:\n      return leaf\n    try:\n      return jax.device_put(leaf, leaf_sharding, donate=donate)\n    except ValueError:\n      try:\n        return jax.make_array_from_callback(leaf.shape, leaf_sharding, lambda idx: leaf[idx])\n      except Exception:\n        return _get_jitted(leaf.sharding, leaf_sharding)(leaf)\n  def reshard_fn(x, sharding):\n    return jax.tree_util.tree_map(_reshard_leaf, x, sharding)\n  return reshard_fn"; c_patched=re.sub(r"def _get_reshard_fn_jax_device_put\(.*?return functools\.partial\(\s*jax\.device_put,\s*donate=donate,\s*\)", new, c, flags=re.DOTALL); open(p,"w").write(c_patched)'
+                      python3 -c 'import re; p="/usr/local/lib/python3.12/site-packages/tunix/rl/reshard.py"; c=open(p).read(); new="def _get_reshard_fn_jax_device_put(*, donate: bool, cache_resharding_plans: bool = False, use_experimental_pre_reshard: bool = False):\n  import functools\n  @functools.lru_cache(maxsize=1024)\n  def _get_jitted(in_spec, out_spec):\n    return jax.jit(lambda arr: arr, in_shardings=in_spec, out_shardings=out_spec)\n  def _reshard_leaf(leaf, leaf_sharding):\n    if not isinstance(leaf, jax.Array):\n      return leaf\n    if hasattr(leaf, \"sharding\") and leaf.sharding == leaf_sharding:\n      return leaf\n    try:\n      return jax.device_put(leaf, leaf_sharding, donate=donate)\n    except ValueError:\n      try:\n        return jax.make_array_from_callback(leaf.shape, leaf_sharding, lambda idx: leaf[idx])\n      except Exception:\n        return _get_jitted(leaf.sharding, leaf_sharding)(leaf)\n  def reshard_fn(x, sharding):\n    return jax.tree_util.tree_map(_reshard_leaf, x, sharding)\n  return reshard_fn"; c_patched=re.sub(r"def _get_reshard_fn_jax_device_put(.*?return functools\.partial\(\s*jax\.device_put,\s*donate=donate,\s*\)", new, c, flags=re.DOTALL); open(p,"w").write(c_patched)'
 
                       cd /deps/src || cd / || true
 
@@ -114,7 +122,6 @@ spec:
 
                       export TOKENIZER_PATH="meta-llama/Llama-3.3-70B-Instruct"
 
-                      # Optional: Pass HuggingFace Token if set in environment
                       HF_TOKEN_ARG=""
                       if [ -n "$HF_TOKEN" ]; then
                         HF_TOKEN_ARG="hf_access_token=${HF_TOKEN}"
@@ -122,55 +129,43 @@ spec:
 
                       export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_impure_enable_packed_bf16_math_ops=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_all_gather_offload_tracing=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_max_concurrent_async_all_gathers=2 --xla_max_concurrent_async_reduce_scatters=2 --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_sparse_core_all_gather_latency_multiplier=1 --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_tpu_scheduler_percent_shared_memory_limit=150 --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_pcie_bandwidth_multiplier=0.03 --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=true '
 
-                      echo "=== Starting Llama 3.3 70B LoRA Fine-Tuning across 2x2x2 TPU mesh ==="
+                      echo "=== Starting Llama 3.3 70B LoRA Fine-Tuning across 8x8 TPU mesh ==="
                       echo "Base Output Dir: ${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}"
                       echo "Loading Base Parameters from: ${MAXTEXT_CKPT_PATH}"
 
-                      export PYTHONUNBUFFERED=1
-
-                      python3 -u -m maxtext.trainers.post_train.sft.train_sft \
+                      JAX_PLATFORMS=tpu python3 -m maxtext.train_sft \
                         "${MAXTEXT_SFT_CONFIG}" \
-                        run_name="${RUN_NAME}" \
-                        base_output_directory="${BASE_OUTPUT_DIRECTORY}" \
                         model_name="${MODEL}" \
                         load_parameters_path="${MAXTEXT_CKPT_PATH}" \
-                        tokenizer_path="${TOKENIZER_PATH}" \
-                        tokenizer_type=huggingface \
+                        base_output_directory="${BASE_OUTPUT_DIRECTORY}" \
+                        run_name="${RUN_NAME}" \
+                        dataset_type=huggingface \
                         hf_path="${DATASET_NAME}" \
-                        train_split="${TRAIN_SPLIT}" \
+                        hf_train_split="${TRAIN_SPLIT}" \
                         hf_data_dir="${HF_DATA_DIR}" \
                         train_data_columns="${TRAIN_DATA_COLUMNS}" \
-                        steps=${STEPS} \
-                        per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
-                        max_target_length=${MAX_TARGET_LENGTH} \
-                        learning_rate=${LEARNING_RATE} \
-                        dtype=bfloat16 \
-                        weight_dtype=bfloat16 \
-                        enable_tensorboard=False \
-                        enable_checkpointing=True \
-                        save_checkpoint_on_completion=True \
-                        enable_nnx=True \
-                        pure_nnx_decoder=True \
-                        lora.enable_lora=True \
-                        lora.lora_rank=${LORA_RANK} \
-                        lora.lora_alpha=${LORA_ALPHA} \
-                        checkpoint_storage_use_zarr3=False \
-                        checkpoint_storage_use_ocdbt=True \
-                        enable_single_controller=False
+                        tokenizer_path="${TOKENIZER_PATH}" \
+                        steps="${STEPS}" \
+                        per_device_batch_size="${PER_DEVICE_BATCH_SIZE}" \
+                        max_target_length="${MAX_TARGET_LENGTH}" \
+                        learning_rate="${LEARNING_RATE}" \
+                        lora_rank="${LORA_RANK}" \
+                        lora_alpha="${LORA_ALPHA}" \
+                        save_period=50 \
+                        async_checkpointing=false \
+                        enable_checkpointing=true \
+                        ${HF_TOKEN_ARG}
 
-                      echo "=== Llama 3.3 70B LoRA Multi-Host Training Completed Successfully! ==="
+                      echo "=== LoRA Training Complete! Saved checkpoint to: ${BASE_OUTPUT_DIRECTORY}/${RUN_NAME} ==="
                   resources:
                     limits:
-                      google.com/tpu: '4'
+                      google.com/tpu: 4
+                    requests:
+                      google.com/tpu: 4
                   volumeMounts:
-                    - mountPath: /dev/shm
-                      name: dshm
-                    - mountPath: /checkpoint
-                      name: gcs-input
+                    - name: checkpoint-pv
+                      mountPath: /checkpoint
               volumes:
-                - name: dshm
-                  emptyDir:
-                    medium: Memory
-                - name: gcs-input
+                - name: checkpoint-pv
                   persistentVolumeClaim:
                     claimName: checkpoint-data-cerence-gke-test-tbd-6e9665fd-pvc
