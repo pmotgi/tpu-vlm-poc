@@ -1,0 +1,76 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: tpu7x-2x2x1-flavor
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+    cloud.google.com/gke-nodepool: <CUSTOMER_NODEPOOL_NAME>
+  tolerations:
+  - key: google.com/tpu
+    operator: Equal
+    value: "present"
+    effect: NoSchedule
+  - key: cloud.google.com/gke-queued
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: dws-prov-2x2x1
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: dws-config-2x2x1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ProvisioningRequestConfig
+metadata:
+  name: dws-config-2x2x1
+spec:
+  provisioningClassName: queued-provisioning.gke.io
+  managedResources:
+  - google.com/tpu
+  retryStrategy:
+    backoffBaseSeconds: 60
+    backoffLimitCount: 3
+    backoffMaxSeconds: 1800
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: tpu7x-2x2x1-cluster-queue
+spec:
+  namespaceSelector: {}
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: dws-prov-2x2x1
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources:
+    - google.com/tpu
+    flavors:
+    - name: tpu7x-2x2x1-flavor
+      resources:
+      - name: google.com/tpu
+        nominalQuota: "4" # 4 TPU chips per 2x2x1 VM (multiply by max-nodes if max-nodes > 1)
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  namespace: default
+  name: tpu7x-2x2x1-dws-queue
+spec:
+  clusterQueue: tpu7x-2x2x1-cluster-queue
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 750
+globalDefault: false
+description: "High priority training jobs"
