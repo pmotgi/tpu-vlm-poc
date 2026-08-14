@@ -22,13 +22,19 @@ This directory contains Kubernetes manifests, benchmarking suite jobs, and compr
 
 Each benchmark suite executes a 9-config sequence matrix (Input / Output token lengths from `128/128` to `8192/1024` and `2048/2048`) with 150 prompts at request rate `inf`:
 
-- **[`benchmark-suite-v6e.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v6e.yaml)**: Benchmarks the 8-chip TPU v6e deployment (`TP=4, DP=2`).
-- **[`benchmark-suite-v6e-4tpu.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v6e-4tpu.yaml)**: Benchmarks the 4-chip TPU v6e deployment (`TP=4, DP=1`).
-- **[`benchmark-suite-v5p.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v5p.yaml)**: Benchmarks the 4-chip TPU v5p deployment (`TP=4, DP=1`).
-- **[`benchmark-suite-v5p-tp2.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v5p-tp2.yaml)**: Benchmarks the 2-chip TPU v5p deployment (`TP=2, DP=1`).
-- **[`benchmark-suite-v7x.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v7x.yaml)**: Benchmarks the TPU v7x pod deployment (`TP=2, DP=1`).
-- **[`benchmark-suite-g4.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-g4.yaml)**: Benchmarks the NVIDIA RTX 6000 Pro deployment (`TP=1`, `g4-standard-48`).
-- **[`benchmark-suite-h100.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-h100.yaml)**: Benchmarks the NVIDIA H100 deployment (`TP=1`, `a3-mega-8g`).
+### A. Text-Based Benchmark Suites
+- **[`benchmark-suite-text-v7x.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-text-v7x.yaml)**: Text benchmark for the TPU v7x Gemma 4 deployment (`http://gemma4-31b-vllm-service:8000`).
+- **[`benchmark-suite-text-v6e.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-text-v6e.yaml)**: Text benchmark for the 8-chip TPU v6e Gemma 4 deployment (`http://gemma4-vllm-tpu-v6e-service:8000`).
+- **[`benchmark-suite-text-v6e-4tpu.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-text-v6e-4tpu.yaml)**: Text benchmark for the 4-chip TPU v6e Gemma 4 deployment (`http://gemma4-vllm-tpu-v6e-4tpu-service:8000`).
+
+### B. Multimodal Benchmark Suites
+- **[`benchmark-suite-v6e.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v6e.yaml)**: Multimodal benchmark for the 8-chip TPU v6e deployment (`TP=4, DP=2`).
+- **[`benchmark-suite-v6e-4tpu.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v6e-4tpu.yaml)**: Multimodal benchmark for the 4-chip TPU v6e deployment (`TP=4, DP=1`).
+- **[`benchmark-suite-v5p.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v5p.yaml)**: Multimodal benchmark for the 4-chip TPU v5p deployment (`TP=4, DP=1`).
+- **[`benchmark-suite-v5p-tp2.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v5p-tp2.yaml)**: Multimodal benchmark for the 2-chip TPU v5p deployment (`TP=2, DP=1`).
+- **[`benchmark-suite-v7x.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-v7x.yaml)**: Multimodal benchmark for the TPU v7x pod deployment (`TP=2, DP=1`).
+- **[`benchmark-suite-g4.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-g4.yaml)**: Multimodal benchmark for NVIDIA RTX 6000 Pro deployment (`TP=1`, `g4-standard-48`).
+- **[`benchmark-suite-h100.yaml`](file:///Users/pmotgi/exploration/cerence/inference/benchmark-suite-h100.yaml)**: Multimodal benchmark for NVIDIA H100 deployment (`TP=1`, `a3-mega-8g`).
 
 ---
 
