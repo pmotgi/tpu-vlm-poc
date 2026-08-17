@@ -73,7 +73,7 @@ from typing import Any, Sequence
 def format_reward(
     prompts: Sequence[str],
     completions: Sequence[str],
-    tmvp_config: Any,
+    tmvp_config: Any = None,
     **kwargs
 ) -> list[float]:
     """Rewards adherence to thinking/reasoning tags: <reasoning>...</reasoning><answer>...</answer>"""
@@ -92,7 +92,7 @@ def format_reward(
 def exact_match_reward(
     prompts: Sequence[str],
     completions: Sequence[str],
-    tmvp_config: Any,
+    tmvp_config: Any = None,
     **kwargs
 ) -> list[float]:
     """Compares the extracted solution against the ground truth answer."""

@@ -13,7 +13,7 @@ import re
 def format_reward(
     prompts: Sequence[str],
     completions: Sequence[str],
-    tmvp_config: Any,
+    tmvp_config: Any = None,
     **kwargs,
 ) -> list[float]:
   """Rewards completion structure: <reasoning>...</reasoning><answer>...</answer>
@@ -21,7 +21,7 @@ def format_reward(
   Args:
       prompts: List of prompt strings.
       completions: List of model-generated completion strings.
-      tmvp_config: Active MaxText configuration object.
+      tmvp_config: Active MaxText configuration object (optional).
       **kwargs: Extra metadata columns passed from the dataset.
 
   Returns:
@@ -40,7 +40,7 @@ def format_reward(
 def exact_match_reward(
     prompts: Sequence[str],
     completions: Sequence[str],
-    tmvp_config: Any,
+    tmvp_config: Any = None,
     **kwargs,
 ) -> list[float]:
   """Verifies the extracted answer against the dataset's ground truth answer.
