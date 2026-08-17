@@ -98,6 +98,8 @@ docker push REGION-docker.pkg.dev/PROJECT/REPO/maxtext-grpo-runner:v2
 
 ## Detailed Documentation
 * **Architecture & Topology**: [`training-grpo/docker/README.md`](file:///Users/pmotgi/exploration/cerence/training-grpo/docker/README.md)
+* **Custom Dataset & Reward Functions Guide**: [`training-grpo/CUSTOM_DATASET_AND_REWARDS_GUIDE.md`](file:///Users/pmotgi/exploration/cerence/training-grpo/CUSTOM_DATASET_AND_REWARDS_GUIDE.md)
+* **Custom Reward Functions Template**: [`training-grpo/custom_rewards_template.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/custom_rewards_template.py)
 * **Kueue 2x2x1 Setup Manifest**: [`training-grpo/kueue-tpu7x-2x2x1-setup.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/kueue-tpu7x-2x2x1-setup.yaml)
 * **DWS 2x2x1 JobSet Manifest**: [`training-grpo/llama3.1-8b-grpo-dws-2x2x1-training.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/llama3.1-8b-grpo-dws-2x2x1-training.yaml)
 * **MFU Performance Calculator**: [`training-grpo/docker/calculate_mfu.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/docker/calculate_mfu.py)
