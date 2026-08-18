@@ -4,6 +4,23 @@ This guide explains how to set up an **MLflow Tracking Server** and stream real-
 
 ---
 
+## Native Metric Logging Backends in MaxText
+
+In [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/cerence/maxtext/src/maxtext/common/metric_logger.py) and [`src/maxtext/configs/base.yml`](file:///Users/pmotgi/exploration/cerence/maxtext/src/maxtext/configs/base.yml), MaxText natively includes five built-in metric logging backends:
+
+| Logging Backend | Configuration Flags | What It Does |
+| :--- | :--- | :--- |
+| **1. TensorBoard** | `enable_tensorboard: true`<br>`tensorboard_dir: "..."` | Writes standard TensorBoard binary event files (`events.out.tfevents.*`) to local disk or Cloud Storage (`gs://...`). Used for TensorBoard UI and enables MLflow real-time autologging. |
+| **2. Weights & Biases** | `enable_wandb: true`<br>`wandb_project_name: "..."`<br>`wandb_run_name: "..."` | Initializes the `wandb` SDK on rank 0 and streams live step loss, learning rate, and throughput metrics directly to your Weights & Biases cloud or self-hosted dashboard. |
+| **3. GCS Metrics JSON** | `gcs_metrics: true`<br>`log_period: 100` | Periodically uploads batch JSONL text files (`metrics_step_000000_to_step_000100.txt`) to `gs://<base_output_directory>/<run_name>/metrics/` for offline analytics. |
+| **4. Local JSON File** | `metrics_file: "/path/to/metrics.json"` | Appends single-line JSON records containing scalar metrics per step to a local filesystem file on disk or PVC. |
+| **5. Google Managed ML Diagnostics** | `managed_mldiagnostics: true` | Streams training step metrics (loss, TFLOPs/device, tokens/sec) directly into Google Cloud Vertex AI Workload Monitor and Cloud Monitoring dashboards. |
+
+> [!NOTE]
+> While MaxText natively supports the five backends above, **MLflow** is widely used for self-hosted experiment tracking. This guide explains how to connect MaxText GRPO post-training workloads to MLflow.
+
+---
+
 ## Workflow Overview
 
 Setting up MLflow tracking consists of two steps:
