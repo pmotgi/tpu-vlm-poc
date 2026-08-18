@@ -1,0 +1,69 @@
+# TRL to MaxText GRPO Configuration Mapping
+
+When migrating GRPO training from Hugging Face TRL (Transformer Reinforcement Learning) on GPUs (e.g., H100/H200) to MaxText on Google Cloud TPUs, many hyperparameters map directly, while others require architectural adjustments due to the nature of TPU static graphs and synchronous data parallelism.
+
+---
+
+## 1. Direct Configuration Mapping
+
+### TRL (Hugging Face) Configuration
+Below is a standard TRL configuration block for GRPO training:
+
+```yaml
+# trl_config.yaml
+training:
+  num_train_epochs: 3
+  learning_rate: 0.000001
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0          # Defaults to 1.0 in TRL
+  save_steps: 100
+  logging_steps: 10
+  per_device_train_batch_size: 16
+  gradient_accumulation_steps: 6
+  gradient_checkpointing: true
+  max_completion_length: 512
+  num_generations: 8
+  beta: 0.001
+  bf16: true
+  do_eval: false
+  eval_steps: 50
+  epsilon_high: 0.2           # Defaults to 0.2
+```
+
+### MaxText (TPU) Command Equivalent
+Here is how those exact parameters translate into MaxText command-line overrides. 
+*(Note: Batch size assumes an 8-device TPU topology like `v7x-2x2x1`. Total Batch = 16 per device * 6 accum * 8 devices = 768).*
+
+```bash
+# MaxText equivalent command arguments
+python3 -m maxtext.trainers.post_train.rl.train_rl maxtext/configs/post_train/rl.yml \
+  num_epoch=3 \
+  learning_rate=1e-6 \
+  gradient_clipping_threshold=1.0 \
+  checkpoint_period=100 \
+  log_period=10 \
+  batch_size=768 \
+  train_micro_batch_size=16 \
+  max_target_length=512 \
+  rl.num_generations=8 \
+  rl.grpo_beta=0.001 \
+  rl.grpo_epsilon=0.2 \
+  weight_dtype=bfloat16 \
+  eval_interval=0 \
+  learning_rate_schedule_steps="<WARMUP_STEPS> <TOTAL_STEPS>" # e.g. "30 1000"
+```
+
+---
+
+## 2. Configurations Not Directly Translated
+
+Because TPUs require statically compiled graphs (XLA) and handle distributed memory globally rather than per-device, some TRL parameters do not have a 1-to-1 equivalent in MaxText.
+
+```text
+group_by_length: false        # Not applicable: TPUs require strictly static graph shapes, making dynamic length grouping irrelevant.
+dataloader_drop_last: true    # Not explicitly toggleable: MaxText's static shape compiler dynamically pads or drops remainders to fit the global batch size.
+warmup_ratio: 0.03            # Requires manual calculation: MaxText requires absolute integer steps (e.g., learning_rate_schedule_steps="30 1000") rather than a float ratio.
+per_device_train_batch_size   # Architecturally different: MaxText defines one global `batch_size` across the entire pod, rather than a per-device micro-batch size.
+loss_type: null               # Bounded support: MaxText natively implements standard 'grpo' and 'gspo-token'; it lacks custom community variants like 'dr_grpo'.
+```
