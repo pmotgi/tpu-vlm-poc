@@ -1,32 +1,64 @@
-# MLflow Metrics Export & Deployment Guide for MaxText GRPO
+# MLflow Tracking & Metrics Export Guide for MaxText GRPO
 
-This guide provides instructions for tracking and visualizing **MaxText GRPO RL post-training metrics** using MLflow. Two deployment options are covered:
-
-1. **Option 1: Exporting to an External or In-Cluster MLflow Server**
-   * **Method 1A (Recommended)**: 1-File Launcher with TensorBoard Autolog (**Zero MaxText code modifications**).
-   * **Method 1B**: Direct native patch inside `src/maxtext/common/metric_logger.py`.
-2. **Option 2: Deploying a Local In-Cluster MLflow Server on GKE** (Zero network/firewall friction).
+This guide explains how to set up an **MLflow Tracking Server** and stream real-time metrics (loss, rewards, TFLOPs, step times) from **MaxText GRPO RL post-training workloads** on Google Cloud TPUs.
 
 ---
 
-## What Metrics Are Logged to MLflow?
+## Workflow Overview
 
-MaxText automatically captures and exports the following metrics per training step:
-* **Training Dynamics**: `learning/loss`, `learning/current_learning_rate`, `learning/grad_norm`, `learning/total_weights`.
-* **RL & GRPO Metrics**: `rewards/exact_match`, `rewards/format`, `learning/dpo_loss` (if applicable), `eval/avg_loss`.
-* **Hardware & Throughput Performance**: `perf/step_time_seconds`, `perf/per_device_tflops_per_sec`, `perf/per_device_tokens_per_sec`.
+Setting up MLflow tracking consists of two steps:
+1. **Step 1: MLflow Server Setup** (Deploy inside GKE or connect to an existing external server).
+2. **Step 2: MaxText Metrics Export** (Use the zero-code launcher wrapper or direct source patch).
+
+```mermaid
+flowchart LR
+    subgraph GKE Cluster
+        Trainer["MaxText GRPO Pod (TPU v7x)"]
+        MLflowServer["MLflow Server (in-cluster)"]
+        Trainer -->|http://mlflow-service:5000| MLflowServer
+    end
+    Laptop["Local Browser (UI)"] -->|kubectl port-forward| MLflowServer
+```
 
 ---
 
-## Option 1: Exporting to an MLflow Server
+## Step 1: Set Up Your MLflow Tracking Server
 
-### Method 1A: 1-File Launcher via TensorBoard Autolog (Recommended — Zero Code Changes to MaxText)
+Choose one of the two server setups below:
 
-Because MaxText writes rich metrics to TensorBoard event files, MLflow's native `mlflow.tensorboard.autolog()` intercepts and streams all scalar summaries to MLflow in real time.
+### Setup A: Deploy In-Cluster MLflow on GKE (Recommended — Zero Network Friction)
+If you don't already have an external MLflow server or if VPC firewalls restrict external egress from TPU nodes, deploy MLflow directly inside your GKE cluster:
+
+1. **Apply the MLflow manifest**:
+   ```bash
+   kubectl apply -f training-grpo/mlflow-in-cluster.yaml
+   ```
+
+2. **Verify the server is running**:
+   ```bash
+   kubectl get pods,svc -l app=mlflow
+   ```
+   *Tracking URI for your training pods*: `http://mlflow-service:5000`
+
+---
+
+### Setup B: Use an Existing External MLflow Server
+If your team already maintains a central MLflow server (e.g. on Cloud Run, a Compute Engine VM, or a managed host):
+
+1. Ensure the GKE Pod CIDR range (e.g. `10.4.0.0/14`) is permitted through the target server's GCP firewall on port `5000`.
+2. *Tracking URI for your training pods*: `http://<EXTERNAL_IP_OR_HOSTNAME>:5000`
+
+---
+
+## Step 2: Export Metrics from MaxText GRPO to MLflow
+
+Choose between the recommended zero-code wrapper or direct source patch:
+
+### Method A: Launcher Wrapper via TensorBoard Autolog (Recommended — 0 MaxText Edits)
+
+Because MaxText natively writes rich scalar metrics to TensorBoard, MLflow's `mlflow.tensorboard.autolog()` intercepts and mirrors all metrics to MLflow in real time without modifying any MaxText code.
 
 #### 1. The Launcher Script ([`train_with_mlflow.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/train_with_mlflow.py))
-
-Save [`train_with_mlflow.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/train_with_mlflow.py) on your mounted PVC (`/checkpoint/train_with_mlflow.py`) or in your container image:
 
 ```python
 """MLflow TensorBoard Autolog Launcher for MaxText GRPO."""
@@ -35,31 +67,29 @@ import sys
 from absl import app
 import mlflow
 
-# 1. Point to MLflow tracking server
+# 1. Point to MLflow Tracking Server
 tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-service:5000")
 experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "maxtext-grpo-training")
 
 mlflow.set_tracking_uri(tracking_uri)
 mlflow.set_experiment(experiment_name)
 
-# 2. Enable TensorBoard Auto-Logging
+# 2. Enable Real-Time TensorBoard Auto-Logging
 mlflow.tensorboard.autolog()
 
-# 3. Launch MaxText RL Trainer
+# 3. Launch MaxText RL Engine
 from maxtext.trainers.post_train.rl.train_rl import main
 
 if __name__ == "__main__":
     app.run(main)
 ```
 
-#### 2. Update the JobSet Manifest
-
-In your JobSet manifest ([`llama3.1-8b-grpo-dws-2x2x1-training.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/llama3.1-8b-grpo-dws-2x2x1-training.yaml)):
+#### 2. Update the JobSet Manifest ([`llama3.1-8b-grpo-dws-2x2x1-training.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/llama3.1-8b-grpo-dws-2x2x1-training.yaml))
 
 ```yaml
             env:
             - name: MLFLOW_TRACKING_URI
-              value: "http://mlflow-service:5000"       # Or external IP / hostname
+              value: "http://mlflow-service:5000"       # In-cluster or external URI
             - name: MLFLOW_EXPERIMENT_NAME
               value: "llama3-1-8b-grpo-training"
             command:
@@ -75,9 +105,9 @@ In your JobSet manifest ([`llama3.1-8b-grpo-dws-2x2x1-training.yaml`](file:///Us
 
 ---
 
-### Method 1B: Direct Native Patch in `metric_logger.py` (Alternative)
+### Method B: Direct Source Patch in `metric_logger.py` (Alternative)
 
-If you prefer modifying the core MaxText library directly, add the following hooks into [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/cerence/maxtext/src/maxtext/common/metric_logger.py):
+If you prefer modifying MaxText source code directly, add the following hooks into [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/cerence/maxtext/src/maxtext/common/metric_logger.py):
 
 #### 1. In `MetricLogger.__init__`:
 ```python
@@ -98,7 +128,7 @@ If you prefer modifying the core MaxText library directly, add the following hoo
         self.write_metrics_to_mlflow(metrics, step)
 ```
 
-#### 3. Helper Method:
+#### 3. Add `write_metrics_to_mlflow` Helper:
 ```python
   def write_metrics_to_mlflow(self, metrics, step):
     """Logs scalar metrics directly to MLflow."""
@@ -121,63 +151,27 @@ If you prefer modifying the core MaxText library directly, add the following hoo
 
 ---
 
-## Option 2: Deploying In-Cluster MLflow on GKE
+## Step 3: Access the MLflow Web UI
 
-If your external MLflow server is blocked by VPC firewalls, or if you want a dedicated, zero-friction tracking server inside the cluster, deploy MLflow directly to GKE.
-
-### Step 2.1: Deploy MLflow Server
-
-Apply the included [`mlflow-in-cluster.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/mlflow-in-cluster.yaml) manifest:
-
-```bash
-kubectl apply -f training-grpo/mlflow-in-cluster.yaml
-```
-
-Verify that the MLflow pod and service are running:
-```bash
-kubectl get pods,svc -l app=mlflow
-```
-Expected output:
-```
-NAME                                 READY   STATUS    RESTARTS   AGE
-pod/mlflow-server-7b4f8d66dc-k2m8p   1/1     Running   0          30s
-
-NAME                     TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)    AGE
-service/mlflow-service   ClusterIP   10.8.12.34    <none>        5000/TCP   30s
-```
-
----
-
-### Step 2.2: Point Training Pods to the In-Cluster Service
-
-In your JobSet manifest, set:
-```yaml
-            env:
-            - name: MLFLOW_TRACKING_URI
-              value: "http://mlflow-service:5000"
-            - name: MLFLOW_EXPERIMENT_NAME
-              value: "llama3-1-8b-grpo"
-```
-
----
-
-### Step 2.3: Access the MLflow Web UI on Your Local Machine
-
-Forward the port to your browser:
+If using in-cluster MLflow, forward the port to your local machine:
 
 ```bash
 kubectl port-forward svc/mlflow-service 5000:5000
 ```
 
-Open your browser and navigate to **`http://localhost:5000`** to view real-time metrics!
+Open **`http://localhost:5000`** in your browser.
 
 ---
 
-## Summary Comparison
+## Exported Metrics Reference Table
 
-| Feature | Method 1A: Launcher Wrapper | Method 1B: Direct Source Patch |
+| Category | Metric Key | Description |
 | :--- | :--- | :--- |
-| **MaxText Code Edits** | **None (0 lines modified)** | ~15 lines in `metric_logger.py` |
-| **Mechanism** | `mlflow.tensorboard.autolog()` | Direct `mlflow.log_metrics()` |
-| **File Required** | `train_with_mlflow.py` | None |
-| **Compatibility** | Upstream MaxText safe | Requires maintaining patch |
+| **Training Loss** | `learning/loss` | Total training loss per optimization step |
+| **Learning Rate** | `learning/current_learning_rate` | Warmup/cosine scheduled learning rate |
+| **Gradients** | `learning/grad_norm` | Global gradient norm |
+| **Reward: Exact Match** | `rewards/exact_match` | Accuracy score of extracted model answers |
+| **Reward: Formatting** | `rewards/format` | Adherence score to `<reasoning>` & `<answer>` tags |
+| **Hardware Throughput** | `perf/per_device_tflops_per_sec` | Actual TFLOP/s achieved per TPU device |
+| **Token Throughput** | `perf/per_device_tokens_per_sec` | Processed training tokens per second per device |
+| **Step Time** | `perf/step_time_seconds` | Elapsed duration per training step in seconds |
