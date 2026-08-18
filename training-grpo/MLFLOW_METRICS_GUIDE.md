@@ -2,7 +2,9 @@
 
 This guide provides instructions for tracking and visualizing **MaxText GRPO RL post-training metrics** using MLflow. Two deployment options are covered:
 
-1. **Option 1: Exporting to an Accessible External MLflow Server** (Cloud Run, VM, or Hosted Server).
+1. **Option 1: Exporting to an External or In-Cluster MLflow Server**
+   * **Method 1A (Recommended)**: 1-File Launcher with TensorBoard Autolog (**Zero MaxText code modifications**).
+   * **Method 1B**: Direct native patch inside `src/maxtext/common/metric_logger.py`.
 2. **Option 2: Deploying a Local In-Cluster MLflow Server on GKE** (Zero network/firewall friction).
 
 ---
@@ -16,20 +18,72 @@ MaxText automatically captures and exports the following metrics per training st
 
 ---
 
-## Option 1: Exporting to an External MLflow Server
+## Option 1: Exporting to an MLflow Server
 
-Use this option if your organization already hosts a central MLflow tracking server that is network-accessible from the GKE cluster.
+### Method 1A: 1-File Launcher via TensorBoard Autolog (Recommended — Zero Code Changes to MaxText)
 
-### Step 1.1: Add MLflow Support to MaxText (`src/maxtext/common/metric_logger.py`)
+Because MaxText writes rich metrics to TensorBoard event files, MLflow's native `mlflow.tensorboard.autolog()` intercepts and streams all scalar summaries to MLflow in real time.
 
-Open [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/cerence/maxtext/src/maxtext/common/metric_logger.py) and add the following hooks:
+#### 1. The Launcher Script ([`train_with_mlflow.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/train_with_mlflow.py))
 
-#### 1. In `MetricLogger.__init__` (around line 122):
+Save [`train_with_mlflow.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/train_with_mlflow.py) on your mounted PVC (`/checkpoint/train_with_mlflow.py`) or in your container image:
+
 ```python
-    # Auto-initialize MLflow if MLFLOW_TRACKING_URI or enable_mlflow is present
+"""MLflow TensorBoard Autolog Launcher for MaxText GRPO."""
+import os
+import sys
+from absl import app
+import mlflow
+
+# 1. Point to MLflow tracking server
+tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-service:5000")
+experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "maxtext-grpo-training")
+
+mlflow.set_tracking_uri(tracking_uri)
+mlflow.set_experiment(experiment_name)
+
+# 2. Enable TensorBoard Auto-Logging
+mlflow.tensorboard.autolog()
+
+# 3. Launch MaxText RL Trainer
+from maxtext.trainers.post_train.rl.train_rl import main
+
+if __name__ == "__main__":
+    app.run(main)
+```
+
+#### 2. Update the JobSet Manifest
+
+In your JobSet manifest ([`llama3.1-8b-grpo-dws-2x2x1-training.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/llama3.1-8b-grpo-dws-2x2x1-training.yaml)):
+
+```yaml
+            env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow-service:5000"       # Or external IP / hostname
+            - name: MLFLOW_EXPERIMENT_NAME
+              value: "llama3-1-8b-grpo-training"
+            command:
+            - python3
+            - /checkpoint/train_with_mlflow.py         # <-- Use the launcher script
+            - maxtext/configs/post_train/rl.yml
+            - model_name=llama3.1-8b-Instruct
+            - tokenizer_path=meta-llama/Llama-3.1-8B-Instruct
+            - run_name=llama3-1-8b-grpo-training-run
+            - base_output_directory=/checkpoint/maxtext
+            - chips_per_vm=4
+```
+
+---
+
+### Method 1B: Direct Native Patch in `metric_logger.py` (Alternative)
+
+If you prefer modifying the core MaxText library directly, add the following hooks into [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/cerence/maxtext/src/maxtext/common/metric_logger.py):
+
+#### 1. In `MetricLogger.__init__`:
+```python
     self.enable_mlflow = getattr(config, "enable_mlflow", False) or bool(os.getenv("MLFLOW_TRACKING_URI"))
     if self.enable_mlflow and jax.process_index() == 0:
-      import mlflow  # lazy import
+      import mlflow
       mlflow_uri = getattr(config, "mlflow_tracking_uri", "") or os.getenv("MLFLOW_TRACKING_URI")
       if mlflow_uri:
         mlflow.set_tracking_uri(mlflow_uri)
@@ -38,13 +92,13 @@ Open [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/ce
       mlflow.start_run(run_name=config.run_name)
 ```
 
-#### 2. In `MetricLogger.write_metrics` (around line 147):
+#### 2. In `MetricLogger.write_metrics`:
 ```python
       if self.enable_mlflow and jax.process_index() == 0:
         self.write_metrics_to_mlflow(metrics, step)
 ```
 
-#### 3. Add the `write_metrics_to_mlflow` helper method:
+#### 3. Helper Method:
 ```python
   def write_metrics_to_mlflow(self, metrics, step):
     """Logs scalar metrics directly to MLflow."""
@@ -58,36 +112,11 @@ Open [`src/maxtext/common/metric_logger.py`](file:///Users/pmotgi/exploration/ce
     mlflow.log_metrics(flat_metrics, step=int(step))
 ```
 
-#### 4. In `MetricLogger.flush_metrics_and_cleanup` (around line 510):
+#### 4. In `MetricLogger.flush_metrics_and_cleanup`:
 ```python
     if self.enable_mlflow and jax.process_index() == 0:
       import mlflow
       mlflow.end_run()
-```
-
----
-
-### Step 1.2: Configure Environment Variables in the JobSet Manifest
-
-In your JobSet manifest ([`llama3.1-8b-grpo-dws-2x2x1-training.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/llama3.1-8b-grpo-dws-2x2x1-training.yaml)), inject the tracking URI and any authentication credentials:
-
-```yaml
-            env:
-            - name: MLFLOW_TRACKING_URI
-              value: "http://<EXTERNAL_MLFLOW_IP_OR_HOSTNAME>:5000"
-            - name: MLFLOW_EXPERIMENT_NAME
-              value: "llama3-1-8b-grpo-post-training"
-            # If your MLflow server requires basic authentication:
-            - name: MLFLOW_TRACKING_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: mlflow-auth-secret
-                  key: username
-            - name: MLFLOW_TRACKING_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mlflow-auth-secret
-                  key: password
 ```
 
 ---
@@ -119,11 +148,9 @@ service/mlflow-service   ClusterIP   10.8.12.34    <none>        5000/TCP   30s
 
 ---
 
-### Step 2.2: Configure JobSet to Point to the In-Cluster Service
+### Step 2.2: Point Training Pods to the In-Cluster Service
 
-Since MLflow is inside the cluster, all TPU pods can reach it using the internal DNS name: `http://mlflow-service:5000`.
-
-Update your JobSet manifest:
+In your JobSet manifest, set:
 ```yaml
             env:
             - name: MLFLOW_TRACKING_URI
@@ -136,27 +163,21 @@ Update your JobSet manifest:
 
 ### Step 2.3: Access the MLflow Web UI on Your Local Machine
 
-Forward the port from GKE to your local browser:
+Forward the port to your browser:
 
 ```bash
 kubectl port-forward svc/mlflow-service 5000:5000
 ```
 
-Open your browser and navigate to:
-```
-http://localhost:5000
-```
-
-You can now monitor live loss curves, reward scores, and hardware TFLOPs per step as the TPU training progresses.
+Open your browser and navigate to **`http://localhost:5000`** to view real-time metrics!
 
 ---
 
 ## Summary Comparison
 
-| Feature | Option 1: External MLflow | Option 2: In-Cluster GKE MLflow |
+| Feature | Method 1A: Launcher Wrapper | Method 1B: Direct Source Patch |
 | :--- | :--- | :--- |
-| **Tracking URI** | `http://<EXTERNAL_IP>:5000` | `http://mlflow-service:5000` |
-| **Firewall Setup** | Requires GCP Firewall rule for GKE Pod CIDR | **None** (internal cluster network) |
-| **Deployment Effort** | Uses existing server | `kubectl apply -f mlflow-in-cluster.yaml` |
-| **UI Access** | Direct external URL | `kubectl port-forward svc/mlflow-service 5000:5000` |
-| **Persistence** | Remote database / storage | PersistentVolumeClaim (`mlflow-storage-pvc`) |
+| **MaxText Code Edits** | **None (0 lines modified)** | ~15 lines in `metric_logger.py` |
+| **Mechanism** | `mlflow.tensorboard.autolog()` | Direct `mlflow.log_metrics()` |
+| **File Required** | `train_with_mlflow.py` | None |
+| **Compatibility** | Upstream MaxText safe | Requires maintaining patch |
