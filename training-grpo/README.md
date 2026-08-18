@@ -98,6 +98,8 @@ docker push REGION-docker.pkg.dev/PROJECT/REPO/maxtext-grpo-runner:v2
 
 ## Detailed Documentation
 * **Architecture & Topology**: [`training-grpo/docker/README.md`](file:///Users/pmotgi/exploration/cerence/training-grpo/docker/README.md)
+* **MLflow Metrics & Tracking Guide**: [`training-grpo/MLFLOW_METRICS_GUIDE.md`](file:///Users/pmotgi/exploration/cerence/training-grpo/MLFLOW_METRICS_GUIDE.md)
+* **In-Cluster MLflow Deployment Manifest**: [`training-grpo/mlflow-in-cluster.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/mlflow-in-cluster.yaml)
 * **Custom Dataset & Reward Functions Guide**: [`training-grpo/CUSTOM_DATASET_AND_REWARDS_GUIDE.md`](file:///Users/pmotgi/exploration/cerence/training-grpo/CUSTOM_DATASET_AND_REWARDS_GUIDE.md)
 * **Custom Reward Functions Template**: [`training-grpo/custom_rewards_template.py`](file:///Users/pmotgi/exploration/cerence/training-grpo/custom_rewards_template.py)
 * **Kueue 2x2x1 Setup Manifest**: [`training-grpo/kueue-tpu7x-2x2x1-setup.yaml`](file:///Users/pmotgi/exploration/cerence/training-grpo/kueue-tpu7x-2x2x1-setup.yaml)
