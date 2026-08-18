@@ -40,19 +40,22 @@ Here is how those exact parameters translate into MaxText command-line overrides
 python3 -m maxtext.trainers.post_train.rl.train_rl maxtext/configs/post_train/rl.yml \
   num_epoch=3 \
   learning_rate=1e-6 \
+  warmup_steps_fraction=0.03 \
   gradient_clipping_threshold=1.0 \
   checkpoint_period=100 \
   log_period=10 \
   batch_size=768 \
   train_micro_batch_size=16 \
-  max_target_length=512 \
+  max_target_length=1024 \
+  max_prefill_predict_length=512 \
   rl.num_generations=8 \
   rl.grpo_beta=0.001 \
   rl.grpo_epsilon=0.2 \
   weight_dtype=bfloat16 \
-  eval_interval=0 \
-  learning_rate_schedule_steps="<WARMUP_STEPS> <TOTAL_STEPS>" # e.g. "30 1000"
+  eval_interval=0
 ```
+
+*(Note on Lengths: `max_target_length` in MaxText is the total sequence length. If your max prompt is 512 and your max completion is 512, set `max_prefill_predict_length=512` and `max_target_length=1024`)*.
 
 ---
 
@@ -63,7 +66,6 @@ Because TPUs require statically compiled graphs (XLA) and handle distributed mem
 ```text
 group_by_length: false        # Not applicable: TPUs require strictly static graph shapes, making dynamic length grouping irrelevant.
 dataloader_drop_last: true    # Not explicitly toggleable: MaxText's static shape compiler dynamically pads or drops remainders to fit the global batch size.
-warmup_ratio: 0.03            # Requires manual calculation: MaxText requires absolute integer steps (e.g., learning_rate_schedule_steps="30 1000") rather than a float ratio.
 per_device_train_batch_size   # Architecturally different: MaxText defines one global `batch_size` across the entire pod, rather than a per-device micro-batch size.
 loss_type: null               # Bounded support: MaxText natively implements standard 'grpo' and 'gspo-token'; it lacks custom community variants like 'dr_grpo'.
 ```
