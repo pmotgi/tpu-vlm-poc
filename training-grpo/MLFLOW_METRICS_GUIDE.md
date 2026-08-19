@@ -83,6 +83,7 @@ import os
 import sys
 from absl import app
 import mlflow
+import mlflow.tensorboard
 
 # 1. Point to MLflow Tracking Server
 tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow-service:5000")
