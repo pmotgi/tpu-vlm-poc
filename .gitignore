@@ -1,0 +1,28 @@
+# --- Large / ephemeral run artifacts -----------------------------------------
+training-grpo/run-logs/
+*.tfevents
+*.tfevents.*
+grpo-qwen-logs.log
+
+# --- Vendored upstream source (clone separately) -----------------------------
+maxtext/
+cluster-toolkit/
+gcp-ai-hpc-reservations-automator/
+
+# --- Local scratch / quarantine ----------------------------------------------
+scratch/
+reference/
+.cleanup-*/
+
+# --- Credentials (never commit) ----------------------------------------------
+*.kubeconfig
+kubeconfig
+*-key.json
+*credentials*.json
+.env
+
+# --- OS / editor --------------------------------------------------------------
+.DS_Store
+__pycache__/
+*.pyc
+.venv/

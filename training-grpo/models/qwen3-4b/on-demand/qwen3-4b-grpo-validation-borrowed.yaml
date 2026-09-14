@@ -1,0 +1,144 @@
+# PORTABLE validation copy of qwen3-4b-grpo-spot-v6e-8-training.yaml.
+#
+# Purpose: prove the Qwen3-4B GRPO config works on a real single-host v6e-8
+# slice, without waiting for spot capacity in our own cluster.
+#
+# Target: cluster borrowed-gke-1 (us-east5-b), nodepool v6e-8-pool
+#         node gke-tpu-875ed415-xm8x, ct6e-standard-8t, topology 2x4, on-demand,
+#         8 allocatable TPU chips, taint google.com/tpu=present:NoSchedule
+#
+# THIS IS A BORROWED CLUSTER. Keep the run short and clean up when done:
+#   KUBECONFIG=/tmp/borrowed.kubeconfig kubectl delete job qwen3-4b-grpo-validation -n default
+#
+# Differences from the home-cluster manifest, and why:
+#   1. Plain batch/v1 Job  -> the JobSet CRD is NOT installed on this cluster.
+#                             Fine here: a single-host slice is one pod, which is
+#                             all JobSet was giving us.
+#   2. nodeSelector        -> v6e-8-pool, and NO gke-spot selector/toleration
+#                             (that node is on-demand, not spot)
+#   3. serviceAccountName  -> omitted; workload-identity-k8s-sa does not exist there
+#   4. /checkpoint         -> emptyDir instead of the gcsfuse PVC, which does not
+#                             exist there. Checkpoints are therefore EPHEMERAL --
+#                             fine, because this run only needs to prove the
+#                             pipeline works, and it has the useful side effect of
+#                             exercising the HF -> Orbax auto-conversion from
+#                             scratch (our biggest untested path).
+#   5. gke-gcsfuse/volumes annotation removed (no PVC to mount)
+#
+# Everything under `command:` is IDENTICAL to the home manifest, so a green run
+# here is a genuine validation of that config.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-4b-grpo-validation
+  namespace: default
+  labels:
+    app: qwen3-4b-grpo-validation
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen3-4b-grpo-validation
+    spec:
+      schedulerName: default-scheduler
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 100
+        fsGroup: 100
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v6e-8-pool
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: grpo-trainer
+        image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+        securityContext:
+          privileged: true
+          runAsUser: 0
+          runAsGroup: 100
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        - name: VLLM_TARGET_DEVICE
+          value: "tpu"
+        - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+          value: "python"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        - name: TF_CPP_MIN_LOG_LEVEL
+          value: "2"
+        - name: NEW_MODEL_DESIGN
+          value: "1"
+        # ---- identical to the home manifest from here ----
+        command:
+        - python3
+        - -m
+        - maxtext.trainers.post_train.rl.train_rl
+        - maxtext/configs/post_train/rl.yml
+        - model_name=qwen3-4b
+        - tokenizer_path=Qwen/Qwen3-4B
+        # ---- arg list is byte-identical to the workshop manifest except run_name ----
+        # Keep it that way: the whole point of this job is to validate that file.
+        - run_name=qwen3-4b-grpo-omi2-g8-test3
+        - base_output_directory=/checkpoint/maxtext-qwen3-4b
+        - chips_per_vm=8
+        # Turn-marker-free template: gsm8k_rl.json bakes Gemma <start_of_turn>
+        # markers into the message content, which Qwen's tokenizer would then
+        # wrap again in <|im_start|>.
+        - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+        # Harder dataset. Qwen3-4B sits at the exact reward ceiling (0.3667) on
+        # GSM8K from step 0, so that task cannot produce a rising curve.
+        # Single shard: a 50-step run needs 50 problems, not 1M.
+        - dataset_name=nvidia/OpenMathInstruct-2
+        - hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-00000-of-00003.parquet
+        - train_split=train_1M
+        - eval_dataset_name=nvidia/OpenMathInstruct-2
+        # Harder problems -> longer reasoning. MEASURED at 4096: 8 of 11 steps hit
+        # the 3584-token cap and reward tracked token budget, not correctness.
+        # 8192/512 matches upstream for this dataset.
+        - max_target_length=8192
+        - max_prefill_predict_length=512
+        # Total per-chip HBM ceiling; leaves headroom for AdamW state, which is
+        # allocated outside vLLM's accounting.
+        # 0.5 not 0.6: at max_target_length=8192 the jit__train_step program needs
+        # 9.75 GB/chip and only found 8.75 GB free at 0.6. These two settings are
+        # coupled -- raise one, lower the other.
+        - hbm_utilization_vllm=0.5
+        # 8 samples per group. Measured to produce real within-group disagreement
+        # (0.375, 0.875) where n=2 produced none.
+        - rl.num_generations=8
+        # Flush metrics every step instead of every 20 so they can be read live.
+        - log_period=1
+        - num_batches=50
+        - num_test_batches=0
+        - eval_interval=0
+        resources:
+          limits:
+            google.com/tpu: '8'
+          requests:
+            google.com/tpu: '8'
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /checkpoint
+          name: ckpt
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      # Ephemeral: holds the HF download (~8 GB) plus the converted Orbax
+      # checkpoint. Lives on the node boot disk.
+      - name: ckpt
+        emptyDir:
+          sizeLimit: 60Gi

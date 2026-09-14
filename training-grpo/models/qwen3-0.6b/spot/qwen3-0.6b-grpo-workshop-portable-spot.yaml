@@ -1,0 +1,280 @@
+# =============================================================================
+# WORKSHOP MANIFEST (PORTABLE, SPOT) — plain batch/v1 Job, no JobSet CRD needed
+# =============================================================================
+#
+# Same validated GRPO recipe as the on-demand portable manifest, re-tuned so it
+# can realistically FINISH on a preemptible (spot) TPU v6e-8 node pool.
+#
+#   qwen3-0.6b · GSM8K · batch_size=8 · tmicro=2 · lr=2e-5 · 40 steps
+#
+#   Runtime: ~1.13 min/step => ~45 min training + ~10 min startup ≈ 55 min.
+#
+# -----------------------------------------------------------------------------
+# HONEST STATUS OF THIS FILE  (read this before you rely on it)
+# -----------------------------------------------------------------------------
+#   The RECIPE is validated. Every training flag below comes from runs that
+#   completed on real v6e-8 hardware:
+#     - b8 (tmicro=1, 119 steps): reward 0.2569 -> 0.2894, +20%, 100% usable
+#       gradient, 0% truncated.
+#     - b9 (tmicro=2, 119 steps): +18.2%, 100% usable gradient, 0% truncated.
+#       Same curve as b8 at roughly half the wall-clock. tmicro=2 is what this
+#       file uses.
+#
+#   The SPOT PACKAGING is NOT validated end-to-end. We never once got a 120-step
+#   run to survive on a spot v6e-8 pool. The settings below are designed to work
+#   around that, not proven to. See "WHAT SPOT WILL DO TO YOU" below.
+#
+#   If you have any on-demand / reservation / DWS flex-start v6e-8 capacity at
+#   all, use ../on-demand/qwen3-0.6b-grpo-workshop-portable.yaml instead. That
+#   one is confirmed: exit 0, 120 steps, 3h24m, zero OOM.
+#
+# -----------------------------------------------------------------------------
+# WHAT SPOT WILL DO TO YOU
+# -----------------------------------------------------------------------------
+#   Measured on a v6e-8 spot pool: 9 preemptions in a single night. One attempt
+#   at the 120-step run was preempted ~8 minutes after the node came up, before
+#   the first training step even ran.
+#
+#   Two mitigations are baked into this file:
+#
+#   1. num_batches=40 + tmicro=2  -> ~55 min total instead of ~4h25m.
+#      A shorter run is simply more likely to fit between preemptions. This is
+#      the single most important change.
+#
+#   2. backoffLimit + podFailurePolicy (below) -> a preemption is retried and
+#      does NOT count against the retry budget, while a genuine config error
+#      still fails fast instead of burning 4 x 10 min of startup.
+#
+#   NOTE ON RESTARTS: /checkpoint is an emptyDir, so a preempted pod loses
+#   everything and the retry starts cleanly from step 0. That costs you the
+#   ~10 min startup again, but it AVOIDS the nastier failure mode we saw with
+#   durable storage, where restarts resume from the last SAVED checkpoint rather
+#   than the furthest step reached and the run visibly goes BACKWARDS
+#   (observed: 49 -> 30 -> 2 steps). For a demo, a clean restart is better.
+#
+# -----------------------------------------------------------------------------
+# BEFORE YOU APPLY — three things to set
+# -----------------------------------------------------------------------------
+#  1. nodeSelector  -> match YOUR spot v6e-8 pool. Find the labels with:
+#       kubectl get nodes -L cloud.google.com/gke-nodepool \
+#                         -L cloud.google.com/gke-tpu-accelerator \
+#                         -L cloud.google.com/gke-tpu-topology \
+#                         -L cloud.google.com/gke-spot
+#
+#     This manifest assumes v6e-**8**, i.e. topology 2x4. The chip count appears
+#     in THREE places that must agree: gke-tpu-topology, google.com/tpu, and
+#     chips_per_vm. A v6e-4 (2x2) or v6e-16 (4x4) pool will NOT work unchanged.
+#
+#  2. hf-secret  -> must exist in this namespace with key `hf_api_token`:
+#       kubectl create secret generic hf-secret \
+#         --from-literal=hf_api_token=hf_xxxxxxxxxxxxx
+#
+#  3. Image pull -> the image lives in a private Artifact Registry. The new
+#     cluster's node service account needs read access:
+#       gcloud artifacts repositories add-iam-policy-binding pmotgi-vlm-poc-repo \
+#         --location=us-east5 --project=northam-ce-mlai-tpu \
+#         --member="serviceAccount:<NODE_SA>" --role="roles/artifactregistry.reader"
+#
+# -----------------------------------------------------------------------------
+# RUN IT
+# -----------------------------------------------------------------------------
+#   kubectl apply -f qwen3-0.6b-grpo-workshop-portable-spot.yaml
+#   kubectl get pods -w
+#   kubectl logs -f job/qwen3-06b-grpo-workshop-spot   # single container, no -c
+#   kubectl delete job qwen3-06b-grpo-workshop-spot    # clean up
+#
+#   Expect ~10 min of startup (HF download + Orbax conversion + vLLM precompile)
+#   before the first training step. It is NOT hung.
+#
+#   If the pod sits Pending, that is spot capacity, not a bug:
+#     kubectl describe pod <pod> | tail -20
+#
+#   SAVE YOUR METRICS BEFORE THE POD ENDS. /checkpoint is ephemeral, and
+#   `kubectl cp` stops working the moment the pod reaches Succeeded -- not when
+#   it is deleted. Poll during the run:
+#     kubectl cp <pod>:/checkpoint/maxtext-qwen3-0p6b/<run_name>/tensorboard ./tb
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-06b-grpo-workshop-spot
+  namespace: default
+  labels:
+    app: qwen3-06b-grpo-workshop-spot
+spec:
+  completions: 1
+  parallelism: 1
+  # Retry after a preemption. Combined with podFailurePolicy below, preemptions
+  # are free and only REAL failures consume this budget.
+  # Set to 0 while debugging so a broken config fails immediately.
+  backoffLimit: 3
+  # Hard ceiling on the whole Job (2h) so a preemption loop cannot run forever.
+  # 55 min expected runtime + room for one full retry.
+  activeDeadlineSeconds: 7200
+  # --- k8s >= 1.31 only. DELETE this whole podFailurePolicy block if your -----
+  # --- cluster is older; everything else still works, you just lose the   -----
+  # --- "preemption doesn't count against backoffLimit" behaviour.         -----
+  podFailurePolicy:
+    rules:
+      # A spot preemption surfaces as the DisruptionTarget pod condition.
+      # Ignore => retry without incrementing the failure counter.
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+      # Config errors (bad flag, missing secret, OOM) exit non-zero quickly.
+      # Count them normally so backoffLimit actually bites.
+      - action: Count
+        onExitCodes:
+          operator: NotIn
+          values: [0]
+  template:
+    metadata:
+      labels:
+        app: qwen3-06b-grpo-workshop-spot
+    spec:
+      restartPolicy: Never
+      schedulerName: default-scheduler
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 100
+        fsGroup: 100
+      # >>> EDIT: match your cluster's SPOT v6e-8 pool <<<
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v6e-8t-spot          # <-- EDIT: your pool name
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4              # <-- 2x4 == v6e-8
+        cloud.google.com/gke-spot: "true"                   # <-- pins to spot nodes
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+        # Required on spot pools -- without this the pod will not schedule.
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: grpo-trainer
+          # Unmodified. Same image, same digest (sha256:a487db3f2fca...), as the
+          # llama3.1-8b TPU v7x runs. No patches were applied for this workload.
+          image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 100
+          command:
+            - python3
+            - -m
+            - maxtext.trainers.post_train.rl.train_rl
+            - maxtext/configs/post_train/rl.yml
+            # --- model -------------------------------------------------------
+            # 0.6B, not 4B: qwen3-4b already scores a PERFECT 0.3667 on ~50% of
+            # GSM8K steps, so all 8 sampled answers agree and there is no
+            # gradient. 0.6B is wrong often enough to actually learn.
+            - model_name=qwen3-0.6b
+            - tokenizer_path=Qwen/Qwen3-0.6B
+            # MUST be model-specific: the Orbax "already converted?" check is
+            # not model-aware, so sharing a directory loads the WRONG weights.
+            - base_output_directory=/checkpoint/maxtext-qwen3-0p6b
+            # *** BUMP EVERY RUN *** -- reusing a run_name that has a saved
+            # checkpoint makes the trainer silently RESUME instead of restart.
+            # (On this manifest /checkpoint is ephemeral so it matters less,
+            # but keep the habit -- it bites hard on durable storage.)
+            - run_name=workshop-qwen06-spot-001
+            - chips_per_vm=8
+            # --- data --------------------------------------------------------
+            - dataset_name=openai/gsm8k
+            # Use the OMI2 template even for GSM8K: gsm8k_rl.json hardcodes
+            # Gemma's <start_of_turn> markers into the message body, which Qwen
+            # then double-wraps in <|im_start|>.
+            - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+            # --- memory (these two are COUPLED) ------------------------------
+            # Rule: 2048 -> hbm 0.6 ; 8192 -> hbm 0.5. Raise one, lower other.
+            - max_target_length=2048
+            - max_prefill_predict_length=256
+            - hbm_utilization_vllm=0.6
+            # --- the GRPO recipe ---------------------------------------------
+            - rl.num_generations=8
+            - batch_size=8
+            # *** REQUIRED. Without these the job OOMs ~2 min in, on the first
+            # real training step (not at compile time). rl.yml ships -1, which
+            # means "do not split", making this 64 sequences in one step. ***
+            # tmicro=2 (vs 1 on the on-demand file) is the validated fast path:
+            # ~1.13 min/step instead of ~2.1, same reward curve. 16 sequences in
+            # flight, which fits 0.6B comfortably. Do NOT use tmicro=2 with 4B.
+            - train_micro_batch_size=2
+            - rollout_micro_batch_size=2
+            # Highest safe value. 5e-5 COLLAPSES the model (-79% reward,
+            # answers grow to the token cap, KL runs away). Never exceed 2e-5.
+            - learning_rate=2e-5
+            # 40 steps ≈ 45 min, sized to survive spot. Expect roughly +5%
+            # reward rather than the +20% a full 120-step run gives. The curve
+            # still rises -- there is just less room for it to.
+            # Raise toward 120 ONLY if your spot pool is unusually stable.
+            - num_batches=40
+            # --- observability ------------------------------------------------
+            - log_period=1
+            - num_test_batches=0
+            - eval_interval=0
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_TARGET_DEVICE
+              value: "tpu"
+            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+              value: "python"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            - name: TF_CPP_MIN_LOG_LEVEL
+              value: "2"
+            # Required for Qwen3 under tpu_inference. Upstream MaxText sets this
+            # in its own run_qwen3_*_rl.sh scripts. It was NOT set for the
+            # llama3.1-8b runs -- this is the one genuinely new env var.
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+          resources:
+            requests:
+              google.com/tpu: "8"
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: ckpt
+              mountPath: /checkpoint
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        # Holds the HF download (~1.5 GB for 0.6B) plus the converted Orbax
+        # checkpoint and metrics. Lives on the node boot disk, and is LOST on
+        # preemption -- which is why retries restart from step 0.
+        - name: ckpt
+          emptyDir:
+            sizeLimit: 60Gi
+
+# =============================================================================
+# TUNING
+# =============================================================================
+#   Spot pool unusually stable?  num_batches=120 -> ~2h15m, +18% reward (b9).
+#   Very tight session?          num_batches=25  -> ~30 min, curve barely moves.
+#
+# SIZING RULE if you change batch_size or num_generations:
+#   keep (batch_size / train_micro_batch_size) * rl.num_generations
+#        <= 16  for qwen3-0.6b
+#        <=  8  for qwen3-4b
+#   This file: (8 / 2) * 8 = 16. At the limit -- do not raise batch_size
+#   without also raising train_micro_batch_size.
+#
+# EXPECTED LOG NOISE (all harmless, do not chase):
+#   ERROR ... tpu_info.py:40  + a block of Google 404 HTML
+#   AOT lower skipped ... ShardingTypeError
+#   cuInit: UNKNOWN ERROR (303)
+#   Increase the page size from 16 to 32 to avoid SMEM OOM
+#   AttributeError: 'Qwen3ForCausalLM' object has no attribute 'modules'
+#       <- fires at interpreter shutdown AFTER training completes. The pod
+#          still exits 0 and the Job is still marked Complete.
+# =============================================================================

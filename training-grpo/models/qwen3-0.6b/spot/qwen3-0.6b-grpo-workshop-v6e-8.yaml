@@ -1,0 +1,234 @@
+# =============================================================================
+# WORKSHOP MANIFEST — GRPO on TPU v6e-8 that produces a RISING reward curve
+# =============================================================================
+#
+# This is the "b8" recipe: the only configuration out of 13 runs that produced a
+# monotonically increasing reward curve from start to finish.
+#
+#   qwen3-0.6b · GSM8K · batch_size=8 · train_micro_batch_size=1 · lr=2e-5 · 120 steps
+#
+#   Result (validated end-to-end on v6e-8):
+#     steps   0- 19   reward 0.2569
+#     steps  19- 38   reward 0.2661
+#     steps  38- 57   reward 0.2755
+#     steps  57- 76   reward 0.2787
+#     steps  76- 95   reward 0.2845
+#     steps  95-119   reward 0.2894      <- rises in EVERY segment
+#     first-10 vs last-10 = +20%
+#     usable gradient 119/119 (100%) · 0% truncated · 0% at ceiling
+#
+#   Runtime: ~2.1 min/step => ~4h15m for 120 steps, plus ~10 min startup.
+#
+# -----------------------------------------------------------------------------
+# WHY EACH NON-DEFAULT FLAG IS HERE (do not change these casually)
+# -----------------------------------------------------------------------------
+#   model_name=qwen3-0.6b
+#       qwen3-4b is already near-perfect at GSM8K, so its reward curve is flat
+#       and there is nothing for GRPO to learn. 0.6b is wrong often enough that
+#       the 8 sampled answers DISAGREE, which is what creates a gradient.
+#       Usable gradient: 4b = 16% of steps, 0.6b = 100% of steps.
+#
+#   base_output_directory=/checkpoint/maxtext-qwen3-0p6b
+#       MUST be model-specific. The Orbax "already converted?" check is NOT
+#       model-aware; sharing a directory with the 4b runs silently loads the
+#       WRONG checkpoint.
+#
+#   batch_size=8
+#       batch_size counts PROMPTS. With rl.num_generations=8 this averages the
+#       reward over 8 questions x 8 answers, which removes the per-question
+#       noise that made earlier curves look flat.
+#
+#   train_micro_batch_size=1  /  rollout_micro_batch_size=1
+#       *** REQUIRED. Without these the job OOMs. ***
+#       rl.yml ships these as -1, and configs/types.py falls back to the full
+#       batch_size when the value is <= 0 -- i.e. NO splitting. batch_size=8 with
+#       num_generations=8 is then 64 sequences in one step and HBM blows up
+#       (~2 min in, on the first real training step, NOT at compile time).
+#       Setting 1 gives grad_acc_steps=8. compute_logps_micro_batch_size does
+#       not need setting; it inherits train_micro_batch_size.
+#       (tmicro=2 also fits for 0.6b and is ~40% faster -- see note at bottom.)
+#
+#   learning_rate=2e-5
+#       The stock 3e-6 learns, but slowly (+9% over 99 steps). 2e-5 gives +20%
+#       over 120. *** 5e-5 COLLAPSES THE MODEL: -79% reward, answers grow to the
+#       token limit, 49% truncated, KL runs away to 1.17. NEVER EXCEED 2e-5. ***
+#
+#   max_target_length=2048 + hbm_utilization_vllm=0.6
+#       These are COUPLED. max_target_length sizes the training step as well as
+#       the vLLM KV cache. Rule: 2048 -> hbm 0.6 ; 8192 -> hbm 0.5.
+#       Raise one, lower the other. 0.6b never truncates at 2048.
+#
+#   data_template_path=...openmathinstruct2_rl.json
+#       Use this even for GSM8K. gsm8k_rl.json hardcodes Gemma's
+#       <start_of_turn> markers into the message content, which double-wraps
+#       Qwen prompts.
+#
+#   log_period=1
+#       Stock is 20. Per-step logging is what makes the reward curve readable.
+#
+#   num_test_batches=0 / eval_interval=0
+#       No eval pass; the reward curve is the signal we care about.
+#
+#   run_name=...
+#       *** BUMP THIS EVERY RUN. *** Checkpoints and tensorboard both live under
+#       base_output_directory/run_name/. Reusing a name with an existing
+#       checkpoint makes the trainer silently RESUME instead of starting fresh.
+#
+# -----------------------------------------------------------------------------
+# WARNING: THIS NODE POOL IS SPOT
+# -----------------------------------------------------------------------------
+#   Overnight testing saw 9 preemptions on this pool. Worse, each restart
+#   resumes from the last SAVED checkpoint, not the furthest step reached, so a
+#   run can go backwards (observed: 49 -> 30 -> 2 steps). A 120-step run will
+#   likely never finish here.
+#
+#   For the workshop either:
+#     (a) use an on-demand or flex-start (DWS) v6e-8 node pool, or
+#     (b) drop num_batches to ~40 so a run finishes inside a preemption window
+#         (expect ~+5% instead of +20%).
+#
+# -----------------------------------------------------------------------------
+# RUN IT
+# -----------------------------------------------------------------------------
+#   kubectl apply -f qwen3-0.6b-grpo-workshop-v6e-8.yaml
+#   kubectl get pods -w
+#   kubectl logs -f <pod> -c grpo-trainer        # 3 containers: 2 are gcsfuse
+#
+#   Metrics land in:
+#   gs://checkpoint-data-pmotgi-tpu-v7x-04a179d1/maxtext-qwen3-0p6b/<run_name>/tensorboard/
+#
+#   JobSet pod templates are IMMUTABLE. To change anything:
+#   kubectl delete jobset qwen3-06b-grpo-workshop && kubectl apply -f ...
+# =============================================================================
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: qwen3-06b-grpo-workshop
+  namespace: default
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 5
+  replicatedJobs:
+    - name: slice
+      template:
+        spec:
+          backoffLimit: 0
+          completions: 1
+          parallelism: 1
+          template:
+            metadata:
+              annotations:
+                gke-gcsfuse/volumes: "true"
+              labels:
+                app: qwen3-06b-grpo-workshop
+            spec:
+              restartPolicy: Never
+              schedulerName: default-scheduler
+              automountServiceAccountToken: true
+              serviceAccountName: workload-identity-k8s-sa
+              nodeSelector:
+                cloud.google.com/gke-nodepool: v6e-8t-spot
+                cloud.google.com/gke-spot: "true"
+                cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+                cloud.google.com/gke-tpu-topology: 2x4
+              tolerations:
+                - key: google.com/tpu
+                  operator: Exists
+                  effect: NoSchedule
+                - key: cloud.google.com/gke-spot
+                  operator: Equal
+                  value: "true"
+                  effect: NoSchedule
+              securityContext:
+                fsGroup: 100
+                runAsGroup: 100
+                runAsUser: 0
+              containers:
+                - name: grpo-trainer
+                  image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+                  securityContext:
+                    privileged: true
+                    runAsGroup: 100
+                    runAsUser: 0
+                  command:
+                    - python3
+                    - -m
+                    - maxtext.trainers.post_train.rl.train_rl
+                    - maxtext/configs/post_train/rl.yml
+                    # --- model -------------------------------------------------
+                    - model_name=qwen3-0.6b
+                    - tokenizer_path=Qwen/Qwen3-0.6B
+                    - base_output_directory=/checkpoint/maxtext-qwen3-0p6b
+                    - run_name=workshop-qwen06-gsm8k-lr2e5-001   # BUMP EVERY RUN
+                    - chips_per_vm=8
+                    # --- data --------------------------------------------------
+                    - dataset_name=openai/gsm8k
+                    - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+                    # --- memory (these two are coupled) ------------------------
+                    - max_target_length=2048
+                    - max_prefill_predict_length=256
+                    - hbm_utilization_vllm=0.6
+                    # --- the actual GRPO recipe --------------------------------
+                    - rl.num_generations=8
+                    - batch_size=8
+                    - train_micro_batch_size=1      # REQUIRED or this OOMs
+                    - rollout_micro_batch_size=1    # REQUIRED or this OOMs
+                    - learning_rate=2e-5            # NEVER go above this
+                    - num_batches=120
+                    # --- observability -----------------------------------------
+                    - log_period=1
+                    - num_test_batches=0
+                    - eval_interval=0
+                  env:
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-secret
+                          key: hf_api_token
+                    - name: VLLM_TARGET_DEVICE
+                      value: tpu
+                    - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+                      value: python
+                    - name: VLLM_NO_USAGE_STATS
+                      value: "1"
+                    - name: TF_CPP_MIN_LOG_LEVEL
+                      value: "2"
+                    - name: NEW_MODEL_DESIGN
+                      value: "1"
+                  resources:
+                    requests:
+                      google.com/tpu: "8"
+                    limits:
+                      google.com/tpu: "8"
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
+                    - name: gcs-input
+                      mountPath: /checkpoint
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                - name: gcs-input
+                  persistentVolumeClaim:
+                    claimName: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
+
+# =============================================================================
+# FASTER VARIANT (validated, for a time-boxed workshop session)
+# =============================================================================
+#   train_micro_batch_size=2
+#   rollout_micro_batch_size=2
+#       ~1.3 min/step instead of ~2.1 (about 40% faster). Confirmed to fit in
+#       HBM for 0.6b at batch_size=8 / num_generations=8 (16 sequences in
+#       flight). Do NOT use tmicro=2 with qwen3-4b -- that OOMs.
+#
+#   num_batches=40..60
+#       Finishes in ~1-1.5h. Expect roughly +5% reward instead of +20%; the
+#       curve still rises, it just has less room to.
+#
+# SIZING RULE if you change batch_size or num_generations:
+#   keep  (batch_size / train_micro_batch_size) * rl.num_generations  <= 16
+#   for qwen3-0.6b, and <= 8 for qwen3-4b.
+# =============================================================================

@@ -1,0 +1,142 @@
+# =============================================================================
+# 4B PROBE — the one qwen3-4b configuration that was never tested
+# =============================================================================
+#
+# NOT a workshop manifest. This is an experiment to close a gap in the evidence.
+#
+# WHY THIS EXISTS
+#   qwen3-4b was set aside after 8 runs, best case 16% usable gradient on
+#   OpenMathInstruct-2. But that verdict was reached BEFORE the two discoveries
+#   that rescued qwen3-0.6b:
+#     1. micro-batching (train_micro_batch_size=1), which made batch_size>1
+#        possible at all -- every earlier attempt OOM'd
+#     2. learning_rate=2e-5, ~7x the stock 3e-6
+#   No 4B run has ever used either. So "4B can't learn" rests on runs that
+#   never got the fixes. This tests the true 4B analogue of the winning recipe.
+#
+# WHAT WOULD CHANGE THE RECOMMENDATION
+#   usable gradient >> 16%  AND  a visibly rising reward curve.
+#   If usable gradient stays near 16%, the ceiling-saturation diagnosis holds
+#   and 0.6B remains correct -- batching averages the signal, it does not
+#   create disagreement where all 8 answers were already right.
+#
+# COST
+#   8192 tokens x 8 micro-steps/step. Extrapolating from the earlier bs=1 run
+#   (~1 min/step), expect ~8 min/step => ~5h for 40 steps.
+#   40 steps, not 120, precisely because of that cost.
+#
+# TARGET: borrowed cluster borrowed-gke-1 (us-east5-b), pool v6e-8-pool,
+#         on-demand, 8 chips. Clean up when done:
+#   KUBECONFIG=/tmp/borrowed.kubeconfig kubectl delete job qwen3-4b-probe
+#
+# NOTE: /checkpoint is emptyDir on this cluster, so metrics are EPHEMERAL and
+#       `kubectl exec` stops working the moment the pod reaches Succeeded.
+#       Metrics must be polled out DURING the run (see snapshot_tb.sh).
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-4b-probe
+  namespace: default
+  labels:
+    app: qwen3-4b-probe
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen3-4b-probe
+    spec:
+      schedulerName: default-scheduler
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 100
+        fsGroup: 100
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v6e-8-pool
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: grpo-trainer
+          image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 100
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_TARGET_DEVICE
+              value: "tpu"
+            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+              value: "python"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            - name: TF_CPP_MIN_LOG_LEVEL
+              value: "2"
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+          command:
+            - python3
+            - -m
+            - maxtext.trainers.post_train.rl.train_rl
+            - maxtext/configs/post_train/rl.yml
+            - model_name=qwen3-4b
+            - tokenizer_path=Qwen/Qwen3-4B
+            # Fresh run_name -- reusing a spent one makes the trainer RESUME.
+            - run_name=b10-qwen4b-omi2-bs8-lr2e5
+            - base_output_directory=/checkpoint/maxtext-qwen3-4b
+            - chips_per_vm=8
+            - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+            # Hard dataset: 4B sits at the 0.3667 ceiling on GSM8K, so GSM8K
+            # cannot produce a rising curve for this model at any learning rate.
+            - dataset_name=nvidia/OpenMathInstruct-2
+            - hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-00000-of-00003.parquet
+            - train_split=train_1M
+            - eval_dataset_name=nvidia/OpenMathInstruct-2
+            # 8192 pairs with hbm 0.5 -- these two are coupled. At 0.6 the
+            # training step needed 9.75 GB/chip and found only 8.75 GB free.
+            - max_target_length=8192
+            - max_prefill_predict_length=512
+            - hbm_utilization_vllm=0.5
+            - rl.num_generations=8
+            # ---- THE THREE THINGS NEVER TRIED ON 4B ----
+            - batch_size=8
+            # tmicro=1 keeps the per-step footprint at 1x8 = 8 sequences, the
+            # validated size for 4B. The earlier bs=4 attempt left this at the
+            # -1 default (= no splitting, 32 sequences) and OOM'd.
+            - train_micro_batch_size=1
+            - rollout_micro_batch_size=1
+            - learning_rate=2e-5
+            # --------------------------------------------
+            - log_period=1
+            - num_batches=40
+            - num_test_batches=0
+            - eval_interval=0
+          resources:
+            requests:
+              google.com/tpu: "8"
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: dshm
+            - mountPath: /checkpoint
+              name: ckpt
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: ckpt
+          emptyDir:
+            sizeLimit: 60Gi

@@ -1,0 +1,204 @@
+# =============================================================================
+# WORKSHOP MANIFEST (PORTABLE) — plain batch/v1 Job, no JobSet CRD required
+# =============================================================================
+#
+# Same validated recipe as qwen3-0.6b-grpo-workshop-v6e-8.yaml, packaged as a
+# stock Kubernetes Job so it runs on ANY single-host TPU v6e-8 cluster --
+# including ones without the JobSet controller installed.
+#
+# A single-host v6e-8 slice is exactly one pod, so JobSet was not buying us
+# anything here anyway. This version is the safer default for a workshop where
+# attendees may be on unfamiliar clusters.
+#
+#   qwen3-0.6b · GSM8K · batch_size=8 · train_micro_batch_size=1 · lr=2e-5
+#
+#   Validated result (run "b8", 119 steps on a real v6e-8):
+#     reward 0.2569 -> 0.2894 across six consecutive segments (monotonic)
+#     +20% first-10 vs last-10 · 100% usable gradient · 0% truncated
+#
+# -----------------------------------------------------------------------------
+# BEFORE YOU APPLY — three things to set
+# -----------------------------------------------------------------------------
+#  1. nodeSelector       -> match YOUR v6e-8 node pool name (see below)
+#  2. hf-secret          -> must exist in this namespace, key `hf_api_token`:
+#       kubectl create secret generic hf-secret \
+#         --from-literal=hf_api_token=hf_xxxxxxxxxxxxx
+#  3. run_name           -> bump it for every run (see the warning below)
+#
+#  Find your node pool and topology labels with:
+#    kubectl get nodes -L cloud.google.com/gke-nodepool \
+#                      -L cloud.google.com/gke-tpu-accelerator \
+#                      -L cloud.google.com/gke-tpu-topology
+#
+# -----------------------------------------------------------------------------
+# STORAGE: this version uses an ephemeral emptyDir
+# -----------------------------------------------------------------------------
+#   /checkpoint is an emptyDir, so the HF download, the converted Orbax
+#   checkpoint, the trained weights AND the tensorboard metrics all DISAPPEAR
+#   when the pod is deleted.
+#
+#   That is deliberate -- it needs no PVC, no GCS bucket and no workload
+#   identity, so it runs anywhere. But it means you must copy metrics out
+#   BEFORE the pod goes away:
+#
+#     kubectl cp <pod>:/checkpoint/maxtext-qwen3-0p6b/<run_name>/tensorboard ./tb
+#
+#   `kubectl exec`/`cp` stop working the moment the pod reaches Succeeded, not
+#   when it is deleted -- so poll during the run, or swap in a PVC (see the
+#   JobSet variant, which mounts a gcsfuse PVC and keeps everything durably).
+#
+# -----------------------------------------------------------------------------
+# RUN IT
+# -----------------------------------------------------------------------------
+#   kubectl apply -f qwen3-0.6b-grpo-workshop-portable.yaml
+#   kubectl get pods -w
+#   kubectl logs -f job/qwen3-06b-grpo-workshop      # single container, no -c
+#   kubectl delete job qwen3-06b-grpo-workshop       # clean up
+#
+#   Expect ~10 min of startup (HF download + Orbax conversion + vLLM compile)
+#   before the first training step. It is not hung.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-06b-grpo-workshop
+  namespace: default
+  labels:
+    app: qwen3-06b-grpo-workshop
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen3-06b-grpo-workshop
+    spec:
+      restartPolicy: Never
+      schedulerName: default-scheduler
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 100
+        fsGroup: 100
+      # >>> EDIT THESE to match your cluster's v6e-8 pool <<<
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v6e-8-pool
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+        # Uncomment ONLY if your pool is spot. Note: spot preemption restarts
+        # the run from the last SAVED checkpoint, not the furthest step
+        # reached, so long runs can go backwards. Prefer on-demand.
+        # - key: cloud.google.com/gke-spot
+        #   operator: Equal
+        #   value: "true"
+        #   effect: NoSchedule
+      containers:
+        - name: grpo-trainer
+          # Unmodified. Same image, same digest (sha256:a487db3f2fca...), as the
+          # llama3.1-8b TPU v7x runs. No patches were applied for this workload.
+          image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 100
+          command:
+            - python3
+            - -m
+            - maxtext.trainers.post_train.rl.train_rl
+            - maxtext/configs/post_train/rl.yml
+            # --- model -------------------------------------------------------
+            # 0.6B, not 4B: qwen3-4b already scores a PERFECT 0.3667 on ~50% of
+            # GSM8K steps, so all 8 sampled answers agree and there is no
+            # gradient. 0.6B is wrong often enough to actually learn.
+            - model_name=qwen3-0.6b
+            - tokenizer_path=Qwen/Qwen3-0.6B
+            # MUST be model-specific: the Orbax "already converted?" check is
+            # not model-aware, so sharing a directory loads the WRONG weights.
+            - base_output_directory=/checkpoint/maxtext-qwen3-0p6b
+            # *** BUMP EVERY RUN *** -- reusing a run_name that has a saved
+            # checkpoint makes the trainer silently RESUME instead of restart.
+            - run_name=workshop-qwen06-gsm8k-lr2e5-001
+            - chips_per_vm=8
+            # --- data --------------------------------------------------------
+            - dataset_name=openai/gsm8k
+            # Use the OMI2 template even for GSM8K: gsm8k_rl.json hardcodes
+            # Gemma's <start_of_turn> markers into the message body, which Qwen
+            # then double-wraps in <|im_start|>.
+            - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+            # --- memory (these two are COUPLED) ------------------------------
+            # Rule: 2048 -> hbm 0.6 ; 8192 -> hbm 0.5. Raise one, lower other.
+            - max_target_length=2048
+            - max_prefill_predict_length=256
+            - hbm_utilization_vllm=0.6
+            # --- the GRPO recipe ---------------------------------------------
+            - rl.num_generations=8
+            - batch_size=8
+            # *** REQUIRED. Without these the job OOMs ~2 min in, on the first
+            # real training step (not at compile time). rl.yml ships -1, which
+            # means "do not split", making this 64 sequences in one step. ***
+            - train_micro_batch_size=1
+            - rollout_micro_batch_size=1
+            # Highest safe value. 5e-5 COLLAPSES the model (-79% reward,
+            # answers grow to the token cap, KL runs away). Never exceed 2e-5.
+            - learning_rate=2e-5
+            # 120 -> +20%. 60 -> +5%. Step count is a real lever.
+            - num_batches=120
+            # --- observability ------------------------------------------------
+            - log_period=1
+            - num_test_batches=0
+            - eval_interval=0
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_TARGET_DEVICE
+              value: "tpu"
+            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+              value: "python"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            - name: TF_CPP_MIN_LOG_LEVEL
+              value: "2"
+            # Required for Qwen3 under tpu_inference. Upstream MaxText sets this
+            # in its own run_qwen3_*_rl.sh scripts. It was NOT set for the
+            # llama3.1-8b runs -- this is the one genuinely new env var.
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+          resources:
+            requests:
+              google.com/tpu: "8"
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: ckpt
+              mountPath: /checkpoint
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        # Holds the HF download (~1.5 GB for 0.6B) plus the converted Orbax
+        # checkpoint and metrics. Lives on the node boot disk.
+        - name: ckpt
+          emptyDir:
+            sizeLimit: 60Gi
+
+# =============================================================================
+# FASTER VARIANT for a time-boxed session
+#   train_micro_batch_size=2 + rollout_micro_batch_size=2
+#     ~1.13 min/step instead of ~2.1 (about 45% faster). Fits in HBM for 0.6B.
+#     Do NOT use tmicro=2 with qwen3-4b.
+#   num_batches=40..60  ->  finishes in ~1h, expect ~+5% instead of +20%.
+#
+# SIZING RULE if you change batch_size or num_generations:
+#   keep (batch_size / train_micro_batch_size) * rl.num_generations
+#        <= 16  for qwen3-0.6b
+#        <=  8  for qwen3-4b
+# =============================================================================

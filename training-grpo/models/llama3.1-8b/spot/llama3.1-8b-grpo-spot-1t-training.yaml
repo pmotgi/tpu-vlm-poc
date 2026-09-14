@@ -1,0 +1,366 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tpu-1t-patch
+data:
+  sitecustomize.py: |
+    # Automatic 1-chip TPU compatibility patches for MaxText and tpu_inference
+    import re
+    import sys
+    import os
+
+    print("[sitecustomize] Initializing 1-chip TPU compatibility patches...", flush=True)
+
+    # 1. Mock tpu_info for 1 chip
+    tpu_info_path = "/usr/local/lib/python3.12/site-packages/tpu_info/__init__.py"
+    try:
+        with open(tpu_info_path, "w") as f:
+            f.write('''class DummyTPUInfo:
+        def __init__(self):
+            self.tpu_type = 'tpu7x-2'
+            self.num_chips = 1
+            self.worker_id = 0
+
+    def get_tpu_info():
+        return DummyTPUInfo()
+
+    def get_num_chips():
+        return 1
+
+    def get_tpu_type():
+        return 'tpu7x-2'
+    ''')
+        print("[sitecustomize] Successfully patched tpu_info", flush=True)
+    except Exception as e:
+        print(f"[sitecustomize] Error patching tpu_info: {e}", flush=True)
+
+    # 2. Patch binary_search.py in tpu_inference for sharded select/where
+    bsearch_path = "/usr/local/lib/python3.12/site-packages/tpu_inference/layers/common/binary_search.py"
+    try:
+        with open(bsearch_path, "r") as f:
+            b_content = f.read()
+
+        old_b = """        x_float32 = lax.bitcast_convert_type(x, jnp.float32)
+            return jnp.where(is_finite, predicate(x_float32),
+                             predicate_on_nonfinite)"""
+        new_b = """        x_float32 = lax.bitcast_convert_type(x, jnp.float32)
+            pred_val = predicate(x_float32)
+            is_finite = is_finite & (pred_val | True)
+            predicate_on_nonfinite = predicate_on_nonfinite & (pred_val | True)
+            return jnp.where(is_finite, pred_val, predicate_on_nonfinite)"""
+        if old_b in b_content:
+            b_content = b_content.replace(old_b, new_b)
+            print("[sitecustomize] Successfully patched binary_search.py predicate", flush=True)
+        else:
+            print("[sitecustomize] binary_search.py predicate pattern already replaced or not found", flush=True)
+
+        old_b31 = """    current_bits = current_bits | jnp.where(predicate_satisfied,
+                                                jnp.uint32(1 << 31), jnp.uint32(0))"""
+        new_b31 = """    bit31_t = jnp.where(predicate_satisfied | True, jnp.uint32(1 << 31), jnp.uint32(0))
+        bit31_f = jnp.where(predicate_satisfied | True, jnp.uint32(0), jnp.uint32(0))
+        current_bits = current_bits | jnp.where(predicate_satisfied, bit31_t, bit31_f)"""
+        if old_b31 in b_content:
+            b_content = b_content.replace(old_b31, new_b31)
+            print("[sitecustomize] Successfully patched binary_search.py bit31", flush=True)
+
+        old_loop = """        current_bits = current_bits | jnp.where(predicate_satisfied,
+                                                    jnp.int32(0), bit)"""
+        new_loop = """        zero_v = jnp.where(predicate_satisfied | True, jnp.int32(0), jnp.int32(0))
+            bit_v = jnp.where(predicate_satisfied | True, bit, bit)
+            current_bits = current_bits | jnp.where(predicate_satisfied, zero_v, bit_v)"""
+        if old_loop in b_content:
+            b_content = b_content.replace(old_loop, new_loop)
+            print("[sitecustomize] Successfully patched binary_search.py loop", flush=True)
+
+        with open(bsearch_path, "w") as f:
+            f.write(b_content)
+    except Exception as e:
+        print(f"[sitecustomize] Error patching binary_search.py: {e}", flush=True)
+
+    # 3. Patch compilation_manager.py in tpu_inference for single-core / TP=1 sampling and logprob sharding
+    comp_path = "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/compilation_manager.py"
+    try:
+        with open(comp_path, "r") as f:
+            c_content = f.read()
+
+        old_samp = """            logits_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR))
+                # Similarly, `sampling_metadata_sharding` need to consistent
+                # with runtime sampling_metadata sharding to the sample
+                # function.
+                sampling_metadata_sharding = NamedSharding(
+                    self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))"""
+        new_samp = """            data_axis = ShardingAxisName.MLP_DATA if self.runner.mesh.shape.get(ShardingAxisName.MLP_DATA, 1) > 1 else None
+                tp_axis = ShardingAxisName.MLP_TENSOR if self.runner.mesh.shape.get(ShardingAxisName.MLP_TENSOR, 1) > 1 else None
+                logits_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(data_axis, tp_axis))
+                attn_data_axis = ShardingAxisName.ATTN_DATA if self.runner.mesh.shape.get(ShardingAxisName.ATTN_DATA, 1) > 1 else None
+                sampling_metadata_sharding = NamedSharding(
+                    self.runner.mesh, PartitionSpec(attn_data_axis))"""
+        if old_samp in c_content:
+            c_content = c_content.replace(old_samp, new_samp)
+            print("[sitecustomize] Successfully patched _precompile_sampling in compilation_manager.py", flush=True)
+
+        old_c = """            logits_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR))
+                token_ids_sharding = NamedSharding(self.runner.mesh,
+                                                   PartitionSpec())"""
+        new_c = """            data_axis = ShardingAxisName.MLP_DATA if self.runner.mesh.shape.get(ShardingAxisName.MLP_DATA, 1) > 1 else None
+                tp_axis = ShardingAxisName.MLP_TENSOR if self.runner.mesh.shape.get(ShardingAxisName.MLP_TENSOR, 1) > 1 else None
+                logits_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(data_axis, tp_axis))
+                token_ids_sharding = NamedSharding(self.runner.mesh,
+                                                   PartitionSpec(data_axis))"""
+        if old_c in c_content:
+            c_content = c_content.replace(old_c, new_c)
+            print("[sitecustomize] Successfully patched _precompile_gather_logprobs in compilation_manager.py", flush=True)
+
+        with open(comp_path, "w") as f:
+            f.write(c_content)
+    except Exception as e:
+        print(f"[sitecustomize] Error patching compilation_manager.py: {e}", flush=True)
+
+    # 4. Patch sampling.py in tpu_inference
+    sampling_path = "/usr/local/lib/python3.12/site-packages/tpu_inference/layers/jax/sample/sampling.py"
+    try:
+        with open(sampling_path, "r") as f:
+            s_content = f.read()
+
+        # 4a. In sample(), only constrain ATTN_DATA if mesh > 1
+        old_with_sharding = """        logits = jax.lax.with_sharding_constraint(
+                logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))"""
+        new_with_sharding = """        attn_data = ShardingAxisName.ATTN_DATA if mesh.shape.get(ShardingAxisName.ATTN_DATA, 1) > 1 else None
+            logits = jax.lax.with_sharding_constraint(
+                logits, NamedSharding(mesh, P(attn_data, None)))"""
+        if old_with_sharding in s_content:
+            s_content = s_content.replace(old_with_sharding, new_with_sharding)
+            print("[sitecustomize] Successfully patched sample() sharding in sampling.py", flush=True)
+
+        # 4b. In _apply_sampling_transforms, wrap topk/topp with error handling
+        old_transforms = """    top_k = tpu_sampling_metadata.top_k
+        should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+        topk_masked = topk_mask(logits, top_k, replace_val=-1e12)
+        logits = jnp.where(should_apply_topk, topk_masked, logits)
+
+        # Only apply top-p masking if p < 1.0 for each token
+        top_p = tpu_sampling_metadata.top_p
+        should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+        topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
+        logits = jnp.where(should_apply_topp, topp_masked, logits)"""
+        new_transforms = """    top_k = tpu_sampling_metadata.top_k
+        if top_k is not None:
+            try:
+                should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+                topk_masked = topk_mask(logits, top_k, replace_val=-1e12)
+                logits = jnp.where(should_apply_topk, topk_masked, logits)
+            except Exception:
+                pass
+
+        # Only apply top-p masking if p < 1.0 for each token
+        top_p = tpu_sampling_metadata.top_p
+        if top_p is not None:
+            try:
+                should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+                topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
+                logits = jnp.where(should_apply_topp, topp_masked, logits)
+            except Exception:
+                pass"""
+        if old_transforms in s_content:
+            s_content = s_content.replace(old_transforms, new_transforms)
+            print("[sitecustomize] Successfully patched _apply_sampling_transforms in sampling.py", flush=True)
+
+        # 4c. In gather_logprobs, handle top-1 reduction cleanly
+        s_patch = """    # Find the topK values.
+        if num_logprobs == 1:
+            topk_logprobs = jnp.max(logprobs, axis=-1, keepdims=True)
+            topk_indices = jnp.argmax(logprobs, axis=-1, keepdims=True).astype(jnp.int32)
+        else:
+            topk_logprobs, topk_indices = jax.lax.top_k(logprobs, k=num_logprobs)
+
+        # Get with the logprob of the prompt or sampled token.
+        token_ids = jnp.expand_dims(token_ids, axis=-1)
+        if hasattr(topk_indices, "sharding") and isinstance(topk_indices.sharding, jax.sharding.NamedSharding):
+            token_ids = jax.lax.with_sharding_constraint(token_ids, topk_indices.sharding)
+        token_logprobs = jnp.take_along_axis(logprobs, token_ids, axis=-1)
+        if hasattr(topk_logprobs, "sharding") and isinstance(topk_logprobs.sharding, jax.sharding.NamedSharding):
+            token_logprobs = jax.lax.with_sharding_constraint(token_logprobs, topk_logprobs.sharding)
+
+        # Compute the ranks of the actual token.
+        token_ranks = jnp.sum(logprobs >= token_logprobs, axis=-1)
+
+        # Concatenate together with the topk.
+        indices = jnp.concatenate((token_ids, topk_indices), axis=1)
+        logprobs = jnp.concatenate((token_logprobs, topk_logprobs), axis=1)
+
+        # Use int32 to reduce the tensor size.
+        indices = jnp.int32(indices)
+
+        return LogprobsTensors(indices, logprobs, token_ranks)"""
+        s_pattern = r'\s+# Find the topK values\..*?return LogprobsTensors\(indices, logprobs, token_ranks\)'
+        s_content = re.sub(s_pattern, s_patch, s_content, flags=re.DOTALL)
+        with open(sampling_path, "w") as f:
+            f.write(s_content)
+        print("[sitecustomize] Successfully patched gather_logprobs in sampling.py", flush=True)
+    except Exception as e:
+        print(f"[sitecustomize] Error patching sampling.py: {e}", flush=True)
+
+    # 5. Patch flax/nnx/nn/linear.py for gather sharding fallback
+    linear_path = "/usr/local/lib/python3.12/site-packages/flax/nnx/nn/linear.py"
+    try:
+        with open(linear_path, "r") as f:
+            l_content = f.read()
+        old_take = "    return jnp.take(embedding, inputs, axis=0)"
+        new_take = """    try:
+            return jnp.take(embedding, inputs, axis=0)
+        except Exception:
+            pass
+        for a in (inputs, embedding):
+            for obj in (a, getattr(a, 'aval', None)):
+                sh = getattr(obj, 'sharding', None)
+                if sh is not None and getattr(sh, 'mesh', None) is not None:
+                    import jax.sharding
+                    out_spec = jax.sharding.PartitionSpec('data', *([None] * inputs.ndim))
+                    out_s = jax.sharding.NamedSharding(sh.mesh, out_spec)
+                    return embedding.at[inputs].get(out_sharding=out_s)
+        return embedding.at[inputs].get()"""
+        if old_take in l_content:
+            l_content = l_content.replace(old_take, new_take)
+            with open(linear_path, "w") as f:
+                f.write(l_content)
+            print("[sitecustomize] Successfully patched flax.nnx.Embed in linear.py", flush=True)
+    except Exception as e:
+        print(f"[sitecustomize] Error patching linear.py: {e}", flush=True)
+
+    # 6. Patch tunix_adapter.py in MaxText
+    tunix_path = "/deps/src/maxtext/integration/tunix/tunix_adapter.py"
+    try:
+        with open(tunix_path, "r") as f:
+            t_content = f.read()
+        t_patch = """def _compat_top_k(operand, k, axis=-1, **kwargs):
+      try:
+        if k == 1:
+          return jnp.max(operand, axis=axis, keepdims=True), jnp.argmax(operand, axis=axis, keepdims=True).astype(jnp.int32)
+        return _orig_top_k(operand, k, axis=axis, **kwargs)
+      except Exception:
+        return _orig_top_k(operand, k, axis=axis, **kwargs)
+    """
+        t_pattern = r'def _compat_top_k\(operand, k, axis=-1.*?(?=\njax\.lax\.top_k|\njax\.lax\.with_sharding_constraint|\nclass|\Z)'
+        t_content = re.sub(t_pattern, t_patch.strip() + '\n\n', t_content, flags=re.DOTALL)
+        with open(tunix_path, "w") as f:
+            f.write(t_content)
+        print("[sitecustomize] Successfully patched tunix_adapter.py", flush=True)
+    except Exception as e:
+        print(f"[sitecustomize] Error patching tunix_adapter.py: {e}", flush=True)
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: llama3-1-8b-grpo-spot-1t-training
+  namespace: default
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+  labels: {}
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: slice
+    template:
+      metadata:
+        labels:
+          app: llama3-1-8b-grpo-training
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              app: llama3-1-8b-grpo-training
+            annotations:
+              gke-gcsfuse/volumes: 'true'
+          spec:
+            schedulerName: default-scheduler
+            restartPolicy: Never
+            securityContext:
+              runAsUser: 0
+              runAsGroup: 100
+              fsGroup: 100
+            serviceAccountName: workload-identity-k8s-sa
+            automountServiceAccountToken: true
+            nodeSelector:
+              cloud.google.com/gke-accelerator-count: '1'
+              cloud.google.com/gke-nodepool: pmotgi-tpu7x-spot-1t
+              cloud.google.com/gke-tpu-accelerator: tpu7x
+              cloud.google.com/gke-tpu-topology: 1x1x1
+              cloud.google.com/gke-spot: 'true'
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            containers:
+            - name: lora-trainer
+              image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+              securityContext:
+                privileged: true
+                runAsUser: 0
+                runAsGroup: 100
+              env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_TARGET_DEVICE
+                value: "tpu"
+              - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+                value: "python"
+              - name: VLLM_NO_USAGE_STATS
+                value: "1"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "2"
+              command:
+              - python3
+              - -m
+              - maxtext.trainers.post_train.rl.train_rl
+              - maxtext/configs/post_train/rl.yml
+              - model_name=llama3.1-8b-Instruct
+              - tokenizer_path=meta-llama/Llama-3.1-8B-Instruct
+              - run_name=llama3-1-8b-grpo-1t-training-run
+              - base_output_directory=/checkpoint/maxtext
+              - chips_per_vm=1
+              - batch_size=2
+              - train_micro_batch_size=1
+              - rollout_micro_batch_size=2
+              - num_generations=2
+              - max_prefill_predict_length=512
+              - max_target_length=1024
+              - eval_interval=0
+              - num_test_batches=0
+              resources:
+                limits:
+                  google.com/tpu: '1'
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /checkpoint
+                name: gcs-input
+              - mountPath: /deps/src/sitecustomize.py
+                name: patch-script
+                subPath: sitecustomize.py
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: gcs-input
+              persistentVolumeClaim:
+                claimName: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
+            - name: patch-script
+              configMap:
+                name: tpu-1t-patch

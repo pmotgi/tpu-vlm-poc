@@ -1,0 +1,372 @@
+# GRPO training for Qwen3-4B on a single-host TPU v6e-8 (2x4) SPOT slice.
+#
+# This is the WORKSHOP manifest. It is deliberately minimal.
+#
+# Target nodepool: v6e-8t-spot
+#   machine type : ct6e-standard-8t  (8 x v6e chips, single host, ~31.25 GB HBM each)
+#   zones        : us-central1-a, us-central1-b, us-central1-c
+#   provisioning : Spot, autoscaling 0 -> 1 node
+#
+# ===== WHY THIS IS SIMPLER THAN THE LLAMA 3.1 8B VARIANT =====
+# A v6e chip has only ~31.25 GB of HBM. On a single-host slice MaxText does NOT
+# split devices between trainer and sampler (the split in model_creation_utils.py
+# requires num_vms >= 2, and num_vms = len(devices) // chips_per_vm = 8 // 8 = 1),
+# so the policy model, the reference model and the vLLM rollout engine are all
+# co-resident on the same 8 chips.
+#
+# At 8B that does not fit: the rollout engine keeps a full model replica per chip
+# (~16 GB), which forces rollout_tensor_parallelism=8 to shard it. Sharding the
+# model shards the VOCAB dimension, and tpu_inference's JAX sampler then fails on
+# every op that reduces or gathers over the vocab (jax.lax.top_k,
+# jnp.take_along_axis, ...), requiring monkeypatch shims in tunix_adapter.py.
+#
+# At 4B the replica is only ~8 GB/chip, so we can leave tensor parallelism OFF.
+# No sharded vocab -> no sampler errors -> NO PATCHES AND NO CONFIGMAP.
+# See llama3.1-8b-grpo-spot-v6e-8-training.yaml for the advanced (patched) path.
+#
+# Rough HBM budget per chip, of 31.25 GB:
+#   rollout replica (bf16)                     ~8 GB
+#   trainer weights, sharded over fsdp=8       ~1 GB
+#   reference model, sharded                   ~1 GB
+#   AdamW optimizer state, sharded             ~4 GB
+#   -> ~14 GB, leaving plenty for the KV cache
+#
+# ===== CHECKPOINT =====
+# No load_parameters_path is set on purpose. rl.yml sets
+# convert_checkpoint_if_possible: true, so MaxText resolves the HF repo from
+# HF_IDS[qwen3-4b] = Qwen/Qwen3-4B, downloads it, and converts it to Orbax at
+# <base_output_directory>/0/items on first run. Later runs reuse it.
+#
+# NOTE: that existence check is NOT model-specific, so this job uses its own
+# base_output_directory. Pointing it at the Llama directory would silently load
+# Llama's checkpoint and fail on a shape mismatch.
+#
+# ===== VALIDATED =====
+# This configuration has completed GRPO end-to-end on real v6e-8 hardware:
+#   * borrowed-gke-1 / us-east5-b, on-demand, cold emptyDir  -- 20/20 steps
+#   * pmotgi-tpu-v7x / us-central1, spot, gcsfuse PVC        -- 20/20 steps
+#   * borrowed-gke-1, n=8, 50 steps                          -- 50/50 steps
+# Peak HBM was 74.93 GiB of 249.97 across the 8 chips (~9.4 GB/chip), so there is
+# substantial headroom over the estimate above.
+#
+# One harmless error appears at pod shutdown, AFTER training and checkpointing
+# finish, and should not be chased:
+#   AttributeError: 'Qwen3ForCausalLM' object has no attribute 'modules'
+#   (vllm/v1/engine/llm_engine.py:442, fired from weakref._exitfunc)
+# vLLM's garbage-collection hook assumes a torch nn.Module; tpu_inference's JAX
+# class has none. The pod still reports Completed with exit code 0.
+#
+# ===== HOW TO SEE THE REWARD CURVE =====
+# Reward metrics are NEVER printed to stdout -- `kubectl logs` will not show them.
+# They are written as TensorBoard event files to
+#   <base_output_directory>/<run_name>/tensorboard/
+# The checkpoint PVC is gcsfuse-backed, so that is really a GCS path:
+#   gs://checkpoint-data-pmotgi-tpu-v7x-04a179d1/maxtext-qwen3-4b/<run_name>/tensorboard/
+# Point TensorBoard straight at it:
+#   tensorboard --logdir gs://checkpoint-data-pmotgi-tpu-v7x-04a179d1/maxtext-qwen3-4b
+# The scalars that matter are rewards/train/mean and rewards/train/check_numbers.
+# Because the PVC is ReadWriteMany, this works WHILE the job is still running.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: qwen3-4b-grpo-v6e-8-spot-training
+  namespace: default
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+  labels: {}
+spec:
+  failurePolicy:
+    maxRestarts: 5   # survive spot preemption
+  replicatedJobs:
+  - name: slice
+    template:
+      metadata:
+        labels:
+          app: qwen3-4b-grpo-training
+      spec:
+        parallelism: 1   # single-host v6e-8 slice -> 1 pod
+        completions: 1
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              app: qwen3-4b-grpo-training
+            annotations:
+              gke-gcsfuse/volumes: 'true'
+          spec:
+            schedulerName: default-scheduler
+            restartPolicy: Never
+            securityContext:
+              runAsUser: 0
+              runAsGroup: 100
+              fsGroup: 100
+            serviceAccountName: workload-identity-k8s-sa
+            automountServiceAccountToken: true
+            nodeSelector:
+              cloud.google.com/gke-nodepool: v6e-8t-spot
+              cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+              cloud.google.com/gke-tpu-topology: 2x4
+              cloud.google.com/gke-spot: 'true'
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            - key: cloud.google.com/gke-spot
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+            containers:
+            - name: grpo-trainer
+              # Stock image -- no tunix_adapter.py overlay needed.
+              image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+              securityContext:
+                privileged: true
+                runAsUser: 0
+                runAsGroup: 100
+              env:
+              # Required: the on-the-fly HF -> Orbax conversion downloads from
+              # the Hugging Face Hub.
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_TARGET_DEVICE
+                value: "tpu"
+              - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+                value: "python"
+              - name: VLLM_NO_USAGE_STATS
+                value: "1"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "2"
+              # Set by MaxText's own vLLM decode path (inference/vllm_decode.py)
+              # and by the repo's Qwen3 RL reference script. Harmless for Llama,
+              # but Qwen3 is only exercised upstream with it on.
+              - name: NEW_MODEL_DESIGN
+                value: "1"
+              command:
+              - python3
+              - -m
+              - maxtext.trainers.post_train.rl.train_rl
+              - maxtext/configs/post_train/rl.yml
+              - model_name=qwen3-4b
+              - tokenizer_path=Qwen/Qwen3-4B
+              # NOTE: checkpoints and tensorboard logs both live under
+              # $base_output_directory/$run_name/. Reusing a run_name that already
+              # has a saved checkpoint makes the trainer RESUME from it -- if that
+              # checkpoint is at step 20 and num_batches=20, the job starts, finds
+              # nothing to do, and exits with an empty curve. Bump this for every
+              # fresh run. (The HF->Orbax conversion cache lives one level up at
+              # $base_output_directory/0/items and IS still reused, so startup
+              # stays fast.)
+              - run_name=qwen3-4b-grpo-omi2-g8-run1
+              # Own directory -- see the checkpoint note in the header.
+              - base_output_directory=/checkpoint/maxtext-qwen3-4b
+              # 8 chips on this single host.
+              - chips_per_vm=8
+              #
+              # --- Prompt formatting: REQUIRED for any non-Gemma model ---
+              # rl.yml defaults to gsm8k_rl.json, whose TEMPLATE hardcodes Gemma
+              # turn markers into the message *content*:
+              #   "<start_of_turn>user\n{system_prompt}\n\n{question}<end_of_turn>\n<start_of_turn>model"
+              # That content is then handed to the tokenizer as a chat message, so
+              # the tokenizer ALSO wraps it in its own markers. On Gemma you get
+              # doubled delimiters; on Qwen3 (which uses <|im_start|>/<|im_end|>)
+              # you additionally get Gemma markers as meaningless literal text.
+              # openmathinstruct2_rl.json has the identical SYSTEM_PROMPT but
+              # "TEMPLATE": "{system_prompt}\n\n{question}" -- no turn markers --
+              # so the tokenizer's own chat template is the single source of truth.
+              # It ships in the repo, so it is already inside the image.
+              - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+              #
+              # --- Dataset: REQUIRED for a reward curve that can go UP ---
+              # rl.yml defaults to openai/gsm8k. Measured on two GSM8K runs:
+              #   rewards/train/mean = 0.3667 at step 0 and on ~19 of every 20 steps.
+              # The maximum attainable value is
+              #   (reward_exact_answer 1.0 + reward_exact_format_match 0.1
+              #    + match_format_approximately 0.0) / 3 = 0.3667
+              # i.e. Qwen3-4B is at 100% of the maximum BEFORE training starts. GSM8K
+              # is grade-school arithmetic and a 4B instruct model has already
+              # saturated it, so every possible movement is downward. No value of
+              # rl.num_generations and no number of steps can fix that -- the task has
+              # to supply headroom.
+              #
+              # OpenMathInstruct-2 is MATH-competition level, is a first-class
+              # supported dataset in train_rl.py, and is what BOTH upstream RL scripts
+              # use (run_qwen3_30b_rl.sh, run_gemma4_e4b_rl.sh). The chat template
+              # already selected above is literally named for it.
+              - dataset_name=nvidia/OpenMathInstruct-2
+              # One shard, not the full glob. Upstream uses train_1M-*.parquet, which
+              # is 3 shards / ~1M rows. A 50-step demo consumes 50 problems, so a
+              # single shard (~333k rows) is still three orders of magnitude more than
+              # needed and cuts the startup download to a third. Exact filename rather
+              # than a glob so there is nothing to guess.
+              - hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-00000-of-00003.parquet
+              - train_split=train_1M
+              # Must equal dataset_name to take the prepare_train_and_eval_dataset
+              # branch in train_rl.py:307-316, which carves a 95/5 split out of train.
+              # (Eval itself is still off below via eval_interval=0.)
+              - eval_dataset_name=nvidia/OpenMathInstruct-2
+              # hf_subset ('main', for GSM8K) is ignored once hf_train_files is set --
+              # see utils_rl.py:180-182 -- so it does not need clearing.
+              #
+              # --- Generation budget ---
+              # rl.yml defaults to max_target_length=1024 with
+              # max_prefill_predict_length=256, leaving only 768 tokens to generate.
+              # Qwen3 emits <think>...</think> reasoning by default, which can eat
+              # that entire budget and truncate before the <answer> tag the reward
+              # function looks for -- producing a flat zero reward curve that looks
+              # like a broken demo rather than a crash.
+              #
+              # This is not hypothetical: on GSM8K at max_target_length=2048, step 3
+              # had completions/train/{min,mean,max}_length all exactly 1792 -- the
+              # entire budget -- and that step scored a reward of 0.
+              #
+              # MEASURED on OpenMathInstruct-2 at 4096/512 (3584-token budget):
+              #   mean_length  574 1004 2133 3432 3557 3584x6   (8 of 11 steps capped)
+              #   check_numbers 1.0  1.0 0.625  0.5 0.375 0-0.125
+              # Reward tracked the token budget almost perfectly -- the metric was
+              # measuring "did the answer fit" rather than "was it correct". 4096 is
+              # NOT enough for this dataset: MATH-level problems plus Qwen3's <think>
+              # block routinely exceed it.
+              #
+              # 8192/512 matches upstream (run_qwen3_30b_rl.sh) and gives a 7680-token
+              # generation budget.
+              #
+              # WARNING: raising this is NOT free on HBM, and the KV cache is the
+              # wrong thing to reason about. max_target_length also sets the sequence
+              # length the TRAINING step compiles for, and those activations dominate.
+              # At 8192 with hbm_utilization_vllm=0.6 the run died with:
+              #   RuntimeProgramAllocationFailure: Error loading program
+              #   'jit__train_step': Attempting to reserve 9.75G at the bottom of
+              #   memory. There are 8.75G free.
+              # The rollout KV cache was never the problem (8 seqs x 8192 = ~65k of
+              # ~545k slots). The fix is to shrink vLLM's share so the trainer can
+              # compile: see hbm_utilization_vllm below, lowered 0.6 -> 0.5.
+              - max_target_length=8192
+              - max_prefill_predict_length=512
+              #
+              # --- HBM safety margin ---
+              # hbm_utilization_vllm is a TOTAL per-chip ceiling (trainer +
+              # reference + rollout all count toward it), not vLLM's private budget.
+              # The stock 0.72 would allow 22.5 GB/chip; AdamW optimizer state is
+              # allocated later and outside that accounting (~4 GB/chip at 4B),
+              # which is what left the 8B run with 86 MB free.
+              #
+              # 0.6 was validated at max_target_length=2048 and is fine there. It is
+              # NOT fine at 8192: lowering this ceiling is what leaves room for the
+              # jit__train_step program, which needed 9.75 GB/chip and found only
+              # 8.75 GB free. 0.5 gives back 0.1 x 31.25 = ~3.1 GB/chip, comfortably
+              # covering the ~1 GB shortfall.
+              #
+              # RULE OF THUMB: this value and max_target_length are coupled. If you
+              # raise one, lower the other.
+              #   max_target_length=2048 -> hbm_utilization_vllm=0.6  (validated)
+              #   max_target_length=8192 -> hbm_utilization_vllm=0.5
+              - hbm_utilization_vllm=0.5
+              #
+              # --- Group size: needed for a non-flat reward curve ---
+              # GRPO normalizes rewards *within each group* of num_generations
+              # samples of the same prompt: advantage = (reward - mean) / std.
+              # If every sample in the group earns the same reward, every advantage
+              # is 0 and there is no learning signal.
+              #
+              # Measured on the num_generations=2 run (TensorBoard scalars):
+              #   rewards/train/mean          = 0.3667 on 19 of 20 steps
+              #   rewards/train/check_numbers = 1.0    on 19 of 20 steps
+              # i.e. the model answered correctly essentially every time, so both
+              # samples scored identically and the curve was a flat line.
+              #
+              # Note the samples are NOT identical -- rollout sampling is stochastic
+              # (decode_sampling_temperature=0.9, decode_sampling_top_k=50 are passed
+              # through to vLLM), and completions/train/{min,max}_length differ within
+              # each step. They just all reach the same correct answer. The problem is
+              # accuracy headroom, not sampling diversity.
+              #
+              # At ~95% per-sample accuracy, P(all same) drops from ~90% at n=2 to
+              # ~66% at n=8, so roughly 3x more steps carry a usable gradient.
+              # Both upstream RL scripts (run_qwen3_30b_rl.sh, run_gemma4_e4b_rl.sh)
+              # also use 8; the default of 2 is really a smoke-test value.
+              # Cost is rollout time, not memory: train_micro_batch_size resolves to 1
+              # and remat_policy=custom, so the training step is unchanged.
+              #
+              # MEASURED at n=8 on GSM8K: rewards/train/check_numbers showed genuine
+              # within-group disagreement (0.375 and 0.875 -- i.e. 3-of-8 and 7-of-8
+              # correct) where n=2 produced none at all. The mechanism works. It was
+              # still not enough on GSM8K only because that task was saturated; paired
+              # with OpenMathInstruct-2 above, this is what turns disagreement into a
+              # usable gradient.
+              - rl.num_generations=8
+              #
+              # --- Metric flush cadence ---
+              # Reward metrics are written ONLY to TensorBoard event files under
+              # $base_output_directory/$run_name/tensorboard/ -- they never appear on
+              # stdout, so `kubectl logs` will not show a reward curve.
+              # log_period is the flush-to-disk cadence, NOT the sampling rate: the
+              # log_period=20 run still recorded all 20 steps for every scalar. Set it
+              # to 1 only so the numbers land in GCS as they happen and the curve can
+              # be watched live during the workshop rather than appearing at the end.
+              - log_period=1
+              #
+              # 50 steps, not 20. At n=8 only ~1/3 of steps are expected to carry a
+              # non-zero advantage (see above), so a 20-step run yields ~7 informative
+              # points -- not enough to read as a trend. 50 keeps the run well under
+              # half an hour while giving the curve enough points to be legible.
+              # Note checkpoint_period defaults to 50, so this also saves exactly once
+              # at the end rather than mid-run.
+              - num_batches=50
+              - num_test_batches=0
+              - eval_interval=0
+              #
+              # Deliberately NOT set (this is the whole point of using a 4B model):
+              #   rollout_tensor_parallelism  -> defaults to 1, vocab stays unsharded
+              #   rollout_data_parallelism    -> defaults to -1, uses all 8 chips
+              #   rl.reshard_chunk_size       -> no need to stream the weight transfer
+              #
+              # FALLBACK LADDER, in order, if this fails:
+              #  1. vLLM refuses to load the model / wrong architecture ->
+              #     add: vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}'
+              #     (the repo's Qwen3 RL script passes this; we did not need it)
+              #  2. OOM -> lower hbm_utilization_vllm to 0.5, then drop
+              #     max_target_length back to 2048 (validated) and
+              #     max_prefill_predict_length to 256.
+              #     Optionally pin train_micro_batch_size=1 rollout_micro_batch_size=1;
+              #     they already resolve to 1 from -1, so this is belt-and-braces.
+              #  3. Dataset fails to load -> the single-shard filename above is pinned
+              #     to a 3-shard layout. If nvidia re-shards the repo, fall back to the
+              #     upstream glob: hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet
+              #  4. rewards/train/mean sits at 0 (not 0.3667) -> the model is failing
+              #     everything, the opposite of the GSM8K problem. Check
+              #     completions/train/mean_length in TensorBoard first: if it equals
+              #     max_target_length - max_prefill_predict_length (3584 here), the
+              #     completions are being TRUNCATED before <answer> and the fix is a
+              #     bigger budget (upstream uses 8192/512), not an easier dataset.
+              #     Only if lengths are well under the cap is the task genuinely too
+              #     hard -- in that case go back to dataset_name=openai/gsm8k.
+              #  5. Curve is non-zero but flat -> compare rewards/train/mean against
+              #     its ceiling of 0.3667. Pinned at the ceiling means the task is
+              #     saturated (what GSM8K did); pinned below it with no movement means
+              #     the learning rate is too small for 50 steps. Prefer more steps over
+              #     a bigger learning rate: GRPO is easy to destabilise.
+              #  6. Still no visible learning and the workshop is imminent -> switch to
+              #     model_name=qwen3-0.6b / tokenizer_path=Qwen/Qwen3-0.6B on GSM8K.
+              #     Much smaller, so lots of accuracy headroom and a fast, obvious
+              #     curve. Remember to change base_output_directory as well -- see the
+              #     checkpoint caution in the header.
+              resources:
+                limits:
+                  google.com/tpu: '8'
+                requests:
+                  google.com/tpu: '8'
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /checkpoint
+                name: gcs-input
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: gcs-input
+              persistentVolumeClaim:
+                claimName: checkpoint-data-pmotgi-tpu-v7x-04a179d1-pvc
