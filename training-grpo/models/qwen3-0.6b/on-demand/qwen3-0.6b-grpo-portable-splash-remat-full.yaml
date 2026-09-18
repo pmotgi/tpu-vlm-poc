@@ -1,0 +1,263 @@
+# =============================================================================
+# OPTIMIZATION MANIFEST 2 of 2 — SPLASH ATTENTION + remat_policy=full
+# =============================================================================
+#
+# Builds directly on qwen3-0.6b-grpo-portable-splash.yaml. Two lines differ
+# from the baseline workshop manifest:
+#
+#     + attention=flash        (same as manifest 1)
+#     + remat_policy=full      (NEW — this is what manifest 2 is testing)
+#
+# Run manifest 1 first. The whole point of this file is the delta against it,
+# so measuring it standalone tells you nothing.
+#
+# -----------------------------------------------------------------------------
+# MEASURED RESULT — read this before you get your hopes up
+# -----------------------------------------------------------------------------
+#   Ran against an unmodified control on the same v6e-8, same day, same image.
+#   30 steps each, 26 steady-state steps measured per run.
+#
+#     MaxText trainer phase : 6.85s -> 7.14s   (+0.29s, 95% CI -0.26..+0.85)
+#                                              => INDISTINGUISHABLE FROM ZERO
+#
+#   Both directions of the prediction below turned out to be unmeasurable at
+#   this model size: full remat was neither the textbook regression nor the
+#   PCIe win. At 0.6B the trainer phase is ~7s of a ~110s step, and the
+#   difference disappears into its own +/-0.9s step-to-step noise.
+#
+#   No memory difference was observed either -- but note the instrumentation
+#   could not have seen one: the only HBM numbers this image logs come from
+#   vLLM's kv_cache_manager at rollout boundaries, never the activation peak
+#   inside the MaxText backward pass. See ../README.md Part 8.7.
+#
+
+# -----------------------------------------------------------------------------
+# WHAT remat_policy ACTUALLY CONTROLS
+# -----------------------------------------------------------------------------
+# During the backward pass you need the forward activations. You have three
+# ways to have them on hand, and `remat_policy` picks one per tensor:
+#
+#   save    -- keep it in HBM                  cheapest time, most memory
+#   offload -- push it to host RAM over PCIe,  saves HBM, costs bandwidth
+#              pull it back for the backward
+#   remat   -- throw it away, recompute it     least memory, costs FLOPs
+#
+# rl.yml ships `remat_policy: 'custom'`, and -- this is the part that is easy
+# to miss -- `custom` is not "remat everything". rl.yml pairs it with:
+#
+#     remat_policy: 'custom'
+#     decoder_layer_input: 'offload'
+#     query_proj:          'offload'
+#     key_proj:            'offload'
+#     value_proj:          'offload'
+#
+# So the shipped baseline is an OFFLOADING policy. Every layer, four tensors
+# get shipped device -> pinned_host on the way forward and hauled back on the
+# way backward. That is 28 layers x 4 tensors x 2 crossings of a bus that is
+# roughly an order of magnitude slower than HBM.
+#
+# `remat_policy=full` maps to `policy = None` in MaxText
+# (layers/decoders.py::get_remat_policy) -- nothing saved, nothing offloaded,
+# everything recomputed from the layer input.
+#
+# -----------------------------------------------------------------------------
+# WHY THIS IS NOT OBVIOUSLY A REGRESSION
+# -----------------------------------------------------------------------------
+# The textbook reading of "full remat" is "lowest memory, slowest". That
+# reading assumes you are comparing against SAVING. Here you are comparing
+# against OFFLOADING, and the trade is completely different:
+#
+#     custom/offload : pay PCIe round-trips           (bandwidth-bound)
+#     full           : pay one extra forward pass     (compute-bound)
+#
+# qwen3-0.6b is 600M parameters. Its recompute is cheap and a v6e chip has
+# FLOPs to spare. Host bandwidth, by contrast, is a fixed tax that does not
+# shrink with the model. The prediction going in was that `full` would be
+# roughly neutral-to-faster here, and that the same flag on a 30B model would
+# go the other way.
+#
+# Predictions are not measurements. See ../README.md Part 8 for what the
+# hardware actually did.
+#
+# -----------------------------------------------------------------------------
+# THE COMBINATION IS THE POINT
+# -----------------------------------------------------------------------------
+# Splash and full-remat push on the same constraint from opposite ends, which
+# is why they are stacked here rather than tested separately:
+#
+#   splash        removes the O(seq_len^2) attention activation
+#   full remat    removes the saved/offloaded per-layer activations
+#
+# Both shrink peak HBM during the trainer phase. Neither touches the vLLM
+# rollout phase or the numerics of the update -- the loss curve should be
+# statistically indistinguishable from the baseline. If your reward curve
+# changes shape, something is wrong; these are performance flags, not
+# training-recipe flags.
+#
+# -----------------------------------------------------------------------------
+# BEFORE YOU APPLY — the same three edits as the baseline manifest
+# -----------------------------------------------------------------------------
+#  1. nodeSelector -> match YOUR v6e-8 node pool name
+#  2. hf-secret    -> must exist in this namespace, key `hf_api_token`
+#  3. run_name     -> bump it for every run, or the trainer silently RESUMES
+#
+# -----------------------------------------------------------------------------
+# RUN IT
+# -----------------------------------------------------------------------------
+#   kubectl apply -f qwen3-0.6b-grpo-portable-splash-remat-full.yaml
+#   kubectl logs -f job/qwen3-06b-grpo-splash-remat
+#   kubectl delete job qwen3-06b-grpo-splash-remat
+#
+#   Confirm BOTH flags took effect -- do not assume:
+#     kubectl logs job/qwen3-06b-grpo-splash-remat \
+#       | grep -E "Config param (attention|remat_policy):"
+#     -> "Config param attention: flash"
+#     -> "Config param remat_policy: full"
+#
+#   The offload flags (decoder_layer_input=offload etc.) are still printed in
+#   the config dump. That is expected and harmless: they are only READ by the
+#   'custom' / '*_offloaded' branches, so under 'full' they are dead config.
+#
+# NOTE ON num_batches: 30, matching manifest 1, so the two are directly
+# comparable. Raise to 120 for the full training result.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-06b-grpo-splash-remat
+  namespace: default
+  labels:
+    app: qwen3-06b-grpo-splash-remat
+    experiment: attention-kernel-plus-remat
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen3-06b-grpo-splash-remat
+    spec:
+      restartPolicy: Never
+      schedulerName: default-scheduler
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 100
+        fsGroup: 100
+      # >>> EDIT THESE to match your cluster's v6e-8 pool <<<
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v6e-8-pool
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: grpo-trainer
+          image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 100
+          command:
+            - python3
+            - -m
+            - maxtext.trainers.post_train.rl.train_rl
+            - maxtext/configs/post_train/rl.yml
+            # --- model -------------------------------------------------------
+            - model_name=qwen3-0.6b
+            - tokenizer_path=Qwen/Qwen3-0.6B
+            - base_output_directory=/checkpoint/maxtext-qwen3-0p6b
+            # *** BUMP EVERY RUN ***
+            - run_name=perf-c-splash-rematfull-001
+            - chips_per_vm=8
+            # --- data --------------------------------------------------------
+            - dataset_name=openai/gsm8k
+            - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+            # --- memory (these two are COUPLED) ------------------------------
+            - max_target_length=2048
+            - max_prefill_predict_length=256
+            - hbm_utilization_vllm=0.6
+            # ================== THE OPTIMIZATIONS =============================
+            # (1) Same as manifest 1: Pallas Splash Attention instead of the
+            #     dot_product reference kernel.
+            - attention=flash
+            #
+            # (2) NEW: replace rl.yml's 'custom' policy -- which OFFLOADS
+            #     decoder_layer_input / query_proj / key_proj / value_proj to
+            #     pinned host memory on every one of the 28 layers -- with pure
+            #     recomputation. Trades PCIe round-trips for extra FLOPs.
+            #
+            #     The four *_proj=offload lines in rl.yml are not overridden
+            #     here on purpose: 'full' ignores them entirely, and leaving
+            #     them visible in the config dump makes the A/B honest.
+            - remat_policy=full
+            # ==================================================================
+            # --- the GRPO recipe (UNCHANGED from baseline) --------------------
+            - rl.num_generations=8
+            - batch_size=8
+            - train_micro_batch_size=1
+            - rollout_micro_batch_size=1
+            - learning_rate=2e-5
+            # Benchmark length, matched to manifest 1 for comparability.
+            - num_batches=30
+            # --- observability ------------------------------------------------
+            - log_period=1
+            - num_test_batches=0
+            - eval_interval=0
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_TARGET_DEVICE
+              value: "tpu"
+            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+              value: "python"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            - name: TF_CPP_MIN_LOG_LEVEL
+              value: "2"
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+          resources:
+            requests:
+              google.com/tpu: "8"
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: ckpt
+              mountPath: /checkpoint
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: ckpt
+          emptyDir:
+            sizeLimit: 60Gi
+
+# =============================================================================
+# THE OTHER REMAT POLICIES, IF YOU WANT TO KEEP GOING
+#
+# MaxText exposes a spectrum, fastest/hungriest first:
+#
+#   minimal_with_context          save the most, including attention context
+#   minimal                       save all except context
+#   save_dot_except_mlp           save the attention projections
+#   save_qkv_proj                 save only q/k/v
+#   save_out_proj                 save only the output projection
+#   custom                        per-tensor; rl.yml uses it to OFFLOAD  <- baseline
+#   qkv_proj_offloaded            offload q/k/v
+#   minimal_offloaded             offload all except context
+#   full                          recompute everything                   <- this file
+#
+# The useful experiment after this one is `minimal`: it saves activations in
+# HBM rather than recomputing OR offloading them. On a 0.6B model with splash
+# already freeing the quadratic term, there may be enough HBM to afford it,
+# and it should be the fastest of the three. It will not survive a larger
+# model, which is exactly why the shipped default is conservative.
+# =============================================================================

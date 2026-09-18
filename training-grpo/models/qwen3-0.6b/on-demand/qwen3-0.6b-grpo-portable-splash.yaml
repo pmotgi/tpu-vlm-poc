@@ -1,0 +1,242 @@
+# =============================================================================
+# OPTIMIZATION MANIFEST 1 of 2 — SPLASH ATTENTION
+# =============================================================================
+#
+# Identical to qwen3-0.6b-grpo-workshop-portable.yaml in every respect except
+# ONE line:
+#
+#     + attention=flash
+#
+# Everything else -- model, dataset, batch sizes, learning rate, lengths,
+# hbm_utilization_vllm -- is byte-for-byte the baseline recipe, so any
+# difference you measure is attributable to the attention kernel alone.
+#
+# -----------------------------------------------------------------------------
+# MEASURED RESULT — read this before you get your hopes up
+# -----------------------------------------------------------------------------
+#   Ran against an unmodified control on the same v6e-8, same day, same image.
+#   30 steps each, 26 steady-state steps measured per run.
+#
+#     MaxText trainer phase : 6.85s -> 7.00s   (+0.14s, 95% CI -0.35..+0.64)
+#                                              => INDISTINGUISHABLE FROM ZERO
+#
+#   No measurable speedup. Not because Splash is bad, but because the MaxText
+#   trainer is only ~6.5% of a GRPO step -- vLLM generation is the other ~93.5%
+#   and this flag cannot touch it.
+#
+#   Beware the number you will be tempted to quote: total step time fell
+#   109.3s -> 96.3s (-12%). That is NOT this flag. That run simply generated
+#   27% fewer tokens (4619 vs 6383 per rollout bar) at the same vLLM throughput
+#   (565 vs 594 tok/s). It is sampling variance. Full analysis, including the
+#   phase-split method: ../README.md Part 8.
+#
+
+# -----------------------------------------------------------------------------
+# WHAT THIS ACTUALLY CHANGES
+# -----------------------------------------------------------------------------
+# maxtext/configs/post_train/rl.yml ships:
+#
+#     attention: 'dot_product'
+#
+# `dot_product` is the reference implementation. It materializes the full
+# attention score matrix in HBM:
+#
+#     scores = [batch, heads, q_len, kv_len]  =  [1, 16, 2048, 2048] bf16
+#            = 134 MB per layer, per sequence, and it must be kept alive
+#              across the softmax
+#
+# `attention=flash` selects MaxText's TPU kernel path, which on TPU is the
+# Pallas **Splash Attention** kernel (`splash_attention_kernel`). Splash is the
+# TPU-native descendant of FlashAttention: it tiles the q/kv dimensions into
+# blocks, streams them through VMEM, and keeps only a running softmax
+# accumulator -- so the O(seq_len^2) score matrix is never written to HBM at
+# all. It additionally skips entire blocks that the causal mask makes
+# irrelevant (the "sparsity" that gives Splash its name), which is close to a
+# free ~2x on the fully-causal masks used here.
+#
+# Two effects to expect, and they are independent:
+#   * MEMORY  -- the quadratic activation term disappears. This is the reliable
+#                win, and it is what lets you raise max_target_length or
+#                train_micro_batch_size later.
+#   * SPEED   -- attention becomes compute-bound instead of HBM-bandwidth-bound.
+#                Whether that shows up as wall-clock depends entirely on how
+#                much of your step is attention. In GRPO it often is NOT much:
+#                see the measured numbers in ../README.md, Part 8.
+#
+# -----------------------------------------------------------------------------
+# WHY THIS IS SAFE HERE (the two constraints people trip over)
+# -----------------------------------------------------------------------------
+#  1. Splash tiles the sequence with block sizes `sa_block_q` / `sa_block_kv`,
+#     both defaulting to 512. max_target_length=2048 divides evenly by 512.
+#     If you shorten max_target_length below 512, lower the block sizes too or
+#     the kernel will reject the shape.
+#
+#  2. Splash cannot do autoregressive decode -- MaxText raises
+#     "Decode not supported with flash attention" if you try. That is fine in
+#     this job and ONLY because of how GRPO is wired here: token generation is
+#     done by vLLM (Ragged Paged Attention), not by MaxText. MaxText only ever
+#     runs full-sequence forward+backward passes for the policy loss and the
+#     frozen reference log-probs. Do not copy `attention=flash` into a MaxText
+#     *inference* config.
+#
+#     Corollary: this flag does NOT touch the rollout. vLLM's kernel is
+#     unchanged. Only the trainer half of the step can possibly get faster.
+#
+# -----------------------------------------------------------------------------
+# BEFORE YOU APPLY — the same three edits as the baseline manifest
+# -----------------------------------------------------------------------------
+#  1. nodeSelector -> match YOUR v6e-8 node pool name
+#  2. hf-secret    -> must exist in this namespace, key `hf_api_token`
+#  3. run_name     -> bump it for every run, or the trainer silently RESUMES
+#
+# -----------------------------------------------------------------------------
+# RUN IT
+# -----------------------------------------------------------------------------
+#   kubectl apply -f qwen3-0.6b-grpo-portable-splash.yaml
+#   kubectl logs -f job/qwen3-06b-grpo-splash
+#   kubectl delete job qwen3-06b-grpo-splash
+#
+#   Confirm the kernel actually swapped -- do not assume it:
+#     kubectl logs job/qwen3-06b-grpo-splash | grep "Config param attention:"
+#     -> "Config param attention: flash"
+#
+# NOTE ON num_batches: this file ships 30, not the baseline's 120. 30 steps is
+# enough for a clean steady-state step-time measurement and keeps an A/B pair
+# inside one sitting. Raise it to 120 if you want the +20% reward result
+# instead of the timing.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-06b-grpo-splash
+  namespace: default
+  labels:
+    app: qwen3-06b-grpo-splash
+    experiment: attention-kernel
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen3-06b-grpo-splash
+    spec:
+      restartPolicy: Never
+      schedulerName: default-scheduler
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 100
+        fsGroup: 100
+      # >>> EDIT THESE to match your cluster's v6e-8 pool <<<
+      nodeSelector:
+        cloud.google.com/gke-nodepool: v6e-8-pool
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: grpo-trainer
+          image: us-east5-docker.pkg.dev/northam-ce-mlai-tpu/pmotgi-vlm-poc-repo/my-maxtext-runner:grpo-v2
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 100
+          command:
+            - python3
+            - -m
+            - maxtext.trainers.post_train.rl.train_rl
+            - maxtext/configs/post_train/rl.yml
+            # --- model -------------------------------------------------------
+            - model_name=qwen3-0.6b
+            - tokenizer_path=Qwen/Qwen3-0.6B
+            - base_output_directory=/checkpoint/maxtext-qwen3-0p6b
+            # *** BUMP EVERY RUN ***
+            - run_name=perf-b-splash-001
+            - chips_per_vm=8
+            # --- data --------------------------------------------------------
+            - dataset_name=openai/gsm8k
+            - data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json
+            # --- memory (these two are COUPLED) ------------------------------
+            - max_target_length=2048
+            - max_prefill_predict_length=256
+            - hbm_utilization_vllm=0.6
+            # ================== THE OPTIMIZATION ==============================
+            # rl.yml ships attention='dot_product'. On TPU, 'flash' routes to
+            # the Pallas Splash Attention kernel. This single flag is the
+            # entire difference from the baseline manifest.
+            #
+            # Block sizes are left at their defaults (sa_block_q=512,
+            # sa_block_kv=512). They are exposed if you want to tune:
+            #   - sa_block_q=1024
+            #   - sa_block_kv=1024
+            # Larger blocks = fewer kernel iterations but more VMEM per tile;
+            # 512 is the safe v6e default and 2048 divides evenly by it.
+            - attention=flash
+            # ==================================================================
+            # --- the GRPO recipe (UNCHANGED from baseline) --------------------
+            - rl.num_generations=8
+            - batch_size=8
+            - train_micro_batch_size=1
+            - rollout_micro_batch_size=1
+            - learning_rate=2e-5
+            # Benchmark length. Baseline manifest uses 120; see header.
+            - num_batches=30
+            # --- observability ------------------------------------------------
+            - log_period=1
+            - num_test_batches=0
+            - eval_interval=0
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_TARGET_DEVICE
+              value: "tpu"
+            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
+              value: "python"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            - name: TF_CPP_MIN_LOG_LEVEL
+              value: "2"
+            - name: NEW_MODEL_DESIGN
+              value: "1"
+          resources:
+            requests:
+              google.com/tpu: "8"
+            limits:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: ckpt
+              mountPath: /checkpoint
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: ckpt
+          emptyDir:
+            sizeLimit: 60Gi
+
+# =============================================================================
+# WHERE THE WIN SHOWS UP, AND WHERE IT DOES NOT
+#
+# A GRPO step is two very different phases back to back:
+#
+#   [ vLLM rollout: generate 8 completions x 8 prompts ]  <- unaffected
+#   [ MaxText: reference log-probs + policy fwd/bwd     ]  <- this is what
+#                                                             splash touches
+#
+# At qwen3-0.6b / 2048 tokens the rollout dominates the step, so a large
+# speedup inside the trainer phase still moves total step time only a little.
+# Measured results are in ../README.md, Part 8 -- read them before assuming
+# this flag is a wall-clock win.
+#
+# The memory headroom is the durable benefit. If you want to CONVERT that
+# headroom into throughput, the follow-up is train_micro_batch_size=2
+# (see the sizing rule in ../README.md).
+# =============================================================================

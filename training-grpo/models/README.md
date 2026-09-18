@@ -33,6 +33,23 @@ Result: **+20% reward, monotonic across all six segments, 100% usable gradient,
 > preemption, not configuration. **Use the on-demand one for the workshop**, or
 > move your pool to on-demand/flex-start.
 
+### Optimization variants (benchmarks, not training runs)
+
+| File | Adds | Measured |
+|---|---|---|
+| [`on-demand/qwen3-0.6b-grpo-portable-splash.yaml`](on-demand/qwen3-0.6b-grpo-portable-splash.yaml) | `attention=flash` | ✅ exit 0, 30 steps — **no measurable change** |
+| [`on-demand/qwen3-0.6b-grpo-portable-splash-remat-full.yaml`](on-demand/qwen3-0.6b-grpo-portable-splash-remat-full.yaml) | `+ remat_policy=full` | ✅ exit 0, 30 steps — **no measurable change** |
+
+Both were A/B'd against an unmodified control on the same borrowed v6e-8 on the
+same day. Trainer-phase deltas were +0.14s and +0.29s — statistically
+indistinguishable from zero over 26 steady-state steps each.
+
+The finding that makes them worth keeping: **the MaxText trainer is only ~6.5%
+of a GRPO step; vLLM generation is the other ~93.5%.** MaxText-side flags
+cannot move a GRPO job. Full write-up, and the phase-split method needed to
+avoid mistaking rollout-length variance for a 12% kernel win, in
+[`qwen3-0.6b/README.md` Part 8](qwen3-0.6b/README.md#part-8--optimization-experiments-measured).
+
 ---
 
 ## qwen3-4b — tested, not recommended for a training demo
